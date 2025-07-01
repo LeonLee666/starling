@@ -165,11 +165,21 @@ case $2 in
     # choose the disk index file by settings
     DISK_FILE_PATH=${INDEX_PREFIX_PATH}_disk.index
     if [ $USE_PAGE_SEARCH -eq 1 ]; then
-      if [ ! -f ${INDEX_PREFIX_PATH}_partition.bin ]; then
-        echo "Partition file not found. Run the script with gp option first."
-        exit 1
+      # Page Search模式：自动适配，支持原始索引和优化布局索引
+      if [ -f ${INDEX_PREFIX_PATH}_partition.bin ]; then
+        echo "Using Page Search with REAL optimized layout (partition file found)"
+        DISK_FILE_PATH=${INDEX_PREFIX_PATH}_disk.index
+      else
+        # 检查是否存在原始布局索引
+        OLD_INDEX_FILE=${INDEX_PREFIX_PATH}_disk_beam_search.index
+        if [ -f ${OLD_INDEX_FILE} ]; then
+          DISK_FILE_PATH=$OLD_INDEX_FILE
+          echo "Using Page Search with VIRTUAL partition on original layout (for performance comparison)"
+        else
+          DISK_FILE_PATH=${INDEX_PREFIX_PATH}_disk.index
+          echo "Using Page Search with VIRTUAL partition on available index"
+        fi
       fi
-      echo "Using Page Search with optimized layout"
     else
       # Beam Search的索引选择逻辑：自动检测partition文件
       if [ -f ${INDEX_PREFIX_PATH}_partition.bin ]; then

@@ -743,12 +743,13 @@ namespace diskann {
 
   // 加载分区数据：Page Search总是需要，Beam Search在使用优化布局索引时也需要
   std::string partition_file = std::string(index_prefix) + "_partition.bin";
-  if (use_page_search_ || (file_exists(partition_file) && !use_page_search_)) {
-    // 如果partition文件存在且当前索引是优化布局的，beam search也需要加载映射数据
+  if (use_page_search_) {
+    // Page Search模式：总是加载分区数据（存在时加载真实分区，不存在时创建虚拟分区）
     this->load_partition_data(index_prefix, nnodes_per_sector, num_points);
-    if (!use_page_search_) {
-      diskann::cout << "注意：Beam Search检测到页面布局优化索引，已加载ID映射数据" << std::endl;
-    }
+  } else if (file_exists(partition_file)) {
+    // Beam Search模式：只有在partition文件存在时才加载（说明当前是优化布局索引）
+    this->load_partition_data(index_prefix, nnodes_per_sector, num_points);
+    diskann::cout << "注意：Beam Search检测到页面布局优化索引，已加载ID映射数据" << std::endl;
   }
   if(use_sq_){
     float* maxs = (float*)aligned_alloc(32, aligned_dim * sizeof(float));

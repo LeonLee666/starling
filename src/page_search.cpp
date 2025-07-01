@@ -12,6 +12,47 @@ namespace diskann {
       const _u64 nnodes_per_sector, const _u64 num_points) {
     std::string partition_file = index_prefix + "_partition.bin";
     std::ifstream part(partition_file);
+    
+    // 检查partition文件是否存在
+    if (!part.is_open()) {
+      // 没有partition文件，创建虚拟partition以支持page search在原始索引上工作
+      diskann::cout << "No partition file found. Creating virtual partition for page search compatibility..." << std::endl;
+      
+      if (nnodes_per_sector == 0 || num_points == 0) {
+        throw ANNException("Cannot create virtual partition: nnodes_per_sector and num_points must be provided",
+                           -1, __FUNCSIG__, __FILE__, __LINE__);
+      }
+      
+      // 计算需要的虚拟页面数量（每个扇区作为一个页面）
+      _u64 virtual_partition_nums = (num_points + nnodes_per_sector - 1) / nnodes_per_sector;
+      
+      diskann::cout << "Virtual Partition meta: nodes_per_sector: " << nnodes_per_sector 
+                << " virtual_partition_nums: " << virtual_partition_nums
+                << " num_points: " << num_points << std::endl;
+      
+      // 初始化虚拟分区布局
+      this->gp_layout_.resize(virtual_partition_nums);
+      this->id2page_.resize(num_points);
+      
+      // 创建虚拟分区：按照原始存储顺序，每个扇区作为一个页面
+      for (_u64 page_id = 0; page_id < virtual_partition_nums; page_id++) {
+        _u64 start_node = page_id * nnodes_per_sector;
+        _u64 end_node = std::min(start_node + nnodes_per_sector, num_points);
+        _u64 nodes_in_page = end_node - start_node;
+        
+        this->gp_layout_[page_id].resize(nodes_in_page);
+        for (_u64 i = 0; i < nodes_in_page; i++) {
+          unsigned node_id = start_node + i;
+          this->gp_layout_[page_id][i] = node_id;
+          this->id2page_[node_id] = page_id;
+        }
+      }
+      
+      diskann::cout << "Virtual partition created successfully. Page search can now work on original index." << std::endl;
+      return;
+    }
+    
+    // 存在partition文件，加载真实的分区数据
     _u64          C, partition_nums, nd;
     part.read((char *) &C, sizeof(_u64));
     part.read((char *) &partition_nums, sizeof(_u64));
