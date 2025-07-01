@@ -2,10 +2,18 @@
 
 set -e
 # set -x
+#source config_dataset.sh
+source config_sift1m.sh
+source config_params.sh
 
-source config_local.sh
+# Debug: Print loaded variables
+echo "Debug: BASE_PATH = $BASE_PATH"
+echo "Debug: QUERY_FILE = $QUERY_FILE"
+echo "Debug: PREFIX = $PREFIX"
+echo "Debug: B = $B"
 
 INDEX_PREFIX_PATH="${PREFIX}_M${M}_R${R}_L${BUILD_L}_B${B}/"
+echo "Debug: INDEX_PREFIX_PATH = $INDEX_PREFIX_PATH"
 MEM_SAMPLE_PATH="${INDEX_PREFIX_PATH}SAMPLE_RATE_${MEM_RAND_SAMPLING_RATE}/"
 MEM_INDEX_PATH="${INDEX_PREFIX_PATH}MEM_R_${MEM_R}_L_${MEM_BUILD_L}_ALPHA_${MEM_ALPHA}_MEM_USE_FREQ${MEM_USE_FREQ}_RANDOM_RATE${MEM_RAND_SAMPLING_RATE}_FREQ_RATE${MEM_FREQ_USE_RATE}/"
 GP_PATH="${INDEX_PREFIX_PATH}GP_TIMES_${GP_TIMES}_LOCK_${GP_LOCK_NUMS}_GP_USE_FREQ${GP_USE_FREQ}_CUT${GP_CUT}/"

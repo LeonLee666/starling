@@ -1,0 +1,10 @@
+BASE_PATH=/fast/liliang/DiskANN/build/data/sift/sift_base.fbin
+QUERY_FILE=/fast/liliang/DiskANN/build/data/sift/sift_query.fbin
+GT_FILE=/fast/liliang/DiskANN/build/data/sift/sift_query_base_gt100
+PREFIX=sift_1m
+DATA_TYPE=float
+DIST_FN=l2
+B=0.3
+K=10
+DATA_DIM=128
+DATA_N=1000000
