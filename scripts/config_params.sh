@@ -7,10 +7,10 @@
 ##################
 #   Disk Build   #
 ##################
-R=48
+R=64
 BUILD_L=128
 M=32
-BUILD_T=8
+BUILD_T=48
 
 ##################
 #       SQ       #
@@ -52,8 +52,8 @@ GP_CUT=4096 # the graph's degree will been limited at 4096
 ##############
 #   Search   #
 ##############
-BM_LIST=(4)
-T_LIST=(8)
+BM_LIST=(8)
+T_LIST=(48)
 CACHE=0
 MEM_L=0 # non-zero to enable
 
@@ -62,7 +62,7 @@ USE_PAGE_SEARCH=0 # Set 0 for beam search, 1 for page search (default)
 PS_USE_RATIO=1.0
 
 # KNN
-LS="100"
+LS="10 20 30 40 50 60 70 80 90 100"
 
 # Range search
 RS_LS="80"

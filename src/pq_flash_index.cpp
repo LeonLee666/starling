@@ -741,8 +741,14 @@ namespace diskann {
     index_metadata.close();
 #endif
 
-  if (use_page_search_) {
+  // 加载分区数据：Page Search总是需要，Beam Search在使用优化布局索引时也需要
+  std::string partition_file = std::string(index_prefix) + "_partition.bin";
+  if (use_page_search_ || (file_exists(partition_file) && !use_page_search_)) {
+    // 如果partition文件存在且当前索引是优化布局的，beam search也需要加载映射数据
     this->load_partition_data(index_prefix, nnodes_per_sector, num_points);
+    if (!use_page_search_) {
+      diskann::cout << "注意：Beam Search检测到页面布局优化索引，已加载ID映射数据" << std::endl;
+    }
   }
   if(use_sq_){
     float* maxs = (float*)aligned_alloc(32, aligned_dim * sizeof(float));
@@ -853,10 +859,10 @@ namespace diskann {
     bool waitsRemaining = false;
     for (int i = 0; i < size; i++) {
       auto ithStatus = (*ctx.m_pRequestsStatus)[i];
-      if (ithStatus == IOContext::Status::READ_SUCCESS) {
+      if (ithStatus == IOContext::READ_SUCCESS) {
         completedIndex = i;
         return true;
-      } else if (ithStatus == IOContext::Status::READ_WAIT) {
+      } else if (ithStatus == IOContext::READ_WAIT) {
         waitsRemaining = true;
       }
     }
@@ -1054,21 +1060,66 @@ namespace diskann {
       if (!frontier.empty()) {
         if (stats != nullptr)
           stats->n_hops++;
-        for (_u64 i = 0; i < frontier.size(); i++) {
-          auto                    id = frontier[i];
-          std::pair<_u32, char *> fnhood;
-          fnhood.first = id;
-          fnhood.second = sector_scratch + sector_scratch_idx * SECTOR_LEN;
-          sector_scratch_idx++;
-          frontier_nhoods.push_back(fnhood);
-          frontier_read_reqs.emplace_back(
-              NODE_SECTOR_NO(((size_t) id)) * SECTOR_LEN, SECTOR_LEN,
-              fnhood.second);
-          if (stats != nullptr) {
-            stats->n_4k++;
-            stats->n_ios++;
+          
+        bool use_layout_optimization = (use_page_search_ || (!id2page_.empty()));
+        
+        if (use_layout_optimization) {
+          // 页面布局优化：按页面分组，避免重复IO
+          if (id2page_.empty()) {
+            throw ANNException("ID映射数据未加载，无法使用页面布局优化", 
+                               -1, __FUNCSIG__, __FILE__, __LINE__);
           }
-          num_ios++;
+          
+          // 按页面分组frontier中的节点
+          tsl::robin_map<unsigned, std::vector<unsigned>> page_to_nodes;
+          for (auto id : frontier) {
+            unsigned pid = id2page_[id];
+            page_to_nodes[pid].push_back(id);
+          }
+          
+          // 为每个页面只发起一次IO请求，但为页面内的每个节点创建处理条目
+          for (auto& [pid, nodes_in_page] : page_to_nodes) {
+            // 分配sector buffer
+            char *sector_buf = sector_scratch + sector_scratch_idx * SECTOR_LEN;
+            sector_scratch_idx++;
+            
+            // 发起一次IO请求读取整个页面
+            frontier_read_reqs.emplace_back(
+                (static_cast<_u64>(pid + 1)) * SECTOR_LEN, SECTOR_LEN, sector_buf);
+            
+            // 为页面内的每个frontier节点创建处理条目（共享同一个sector_buf）
+            for (unsigned node_id : nodes_in_page) {
+              std::pair<_u32, char *> fnhood;
+              fnhood.first = node_id;
+              fnhood.second = sector_buf;  // 所有节点共享同一个页面buffer
+              frontier_nhoods.push_back(fnhood);
+            }
+            
+            if (stats != nullptr) {
+              stats->n_4k++;
+              stats->n_ios++;
+            }
+            num_ios++;
+          }
+        } else {
+          // 原始布局：为每个节点单独发起IO请求（保持原有逻辑）
+          for (_u64 i = 0; i < frontier.size(); i++) {
+            auto                    id = frontier[i];
+            std::pair<_u32, char *> fnhood;
+            fnhood.first = id;
+            fnhood.second = sector_scratch + sector_scratch_idx * SECTOR_LEN;
+            sector_scratch_idx++;
+            frontier_nhoods.push_back(fnhood);
+            
+            frontier_read_reqs.emplace_back(
+                NODE_SECTOR_NO(((size_t) id)) * SECTOR_LEN, SECTOR_LEN, fnhood.second);
+            
+            if (stats != nullptr) {
+              stats->n_4k++;
+              stats->n_ios++;
+            }
+            num_ios++;
+          }
         }
         io_timer.reset();
 #ifdef USE_BING_INFRA
@@ -1151,8 +1202,30 @@ namespace diskann {
 #else
       for (auto &frontier_nhood : frontier_nhoods) {
 #endif
-        char *node_disk_buf =
-            OFFSET_TO_NODE(frontier_nhood.second, frontier_nhood.first);
+        char *node_disk_buf = nullptr;
+        
+        // 根据是否使用页面布局优化选择不同的节点定位方式
+        bool use_layout_optimization = (use_page_search_ || (!id2page_.empty()));
+        if (use_layout_optimization) {
+          // 页面布局优化：在页面内搜索具体节点
+          char *sector_buf = frontier_nhood.second;
+          unsigned pid = id2page_[frontier_nhood.first];
+          for (unsigned j = 0; j < gp_layout_[pid].size(); ++j) {
+            unsigned id = gp_layout_[pid][j];
+            if (id == frontier_nhood.first) {
+              node_disk_buf = sector_buf + j * max_node_len;
+              break;
+            }
+          }
+          if (node_disk_buf == nullptr) {
+            throw ANNException("在页面布局中未找到节点", 
+                               -1, __FUNCSIG__, __FILE__, __LINE__);
+          }
+        } else {
+          // 原始布局：使用简单偏移计算
+          node_disk_buf = OFFSET_TO_NODE(frontier_nhood.second, frontier_nhood.first);
+        }
+        
         unsigned *node_buf = OFFSET_TO_NODE_NHOOD(node_disk_buf);
         _u64      nnbrs = (_u64)(*node_buf);
         T *       node_fp_coords = OFFSET_TO_NODE_COORDS(node_disk_buf);
