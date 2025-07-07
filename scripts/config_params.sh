@@ -58,8 +58,8 @@ CACHE=0
 MEM_L=1 # non-zero to enabLE
 
 # Page Search
-USE_PAGE_SEARCH=0 # Set 0 for beam search, 1 for page search (default)
-PS_USE_RATIO=1
+USE_PAGE_SEARCH=1 # Set 0 for beam search, 1 for page search (default)
+PS_USE_RATIO=0.2
 
 # KNN
 LS="10 20 30 40 50 60 70 80 90 100"

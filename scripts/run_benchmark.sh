@@ -3,7 +3,7 @@
 set -e
 # set -x
 #source config_dataset.sh
-source config_sift1m_dataset.sh
+source config_sift100m_dataset.sh
 source config_params.sh
 
 INDEX_PREFIX_PATH="${PREFIX}_M${M}_R${R}_L${BUILD_L}_B${B}/"
