@@ -6,6 +6,8 @@
 #include "pq_flash_index.h"
 #include "timer.h"
 
+#define DYN_BEAM_WIDTH
+
 namespace diskann {
   template<typename T>
   void PQFlashIndex<T>::load_partition_data(const std::string &index_prefix,
@@ -106,6 +108,15 @@ namespace diskann {
 
     std::vector<Neighbor> full_retset;
     full_retset.reserve(4096);
+
+    // Dynamic beam width - using static policy
+#ifdef DYN_BEAM_WIDTH
+    _u32 cur_beam_width = 4;  // start with small beam width
+#else
+    _u32 cur_beam_width = beam_width;  // use fixed beam width
+#endif
+    _u32 max_marker = 0;  // track search progress
+
     _u32                        best_medoid = 0;
     float                       best_dist = (std::numeric_limits<float>::max)();
     std::vector<SimpleNeighbor> medoid_dists;
@@ -218,13 +229,22 @@ namespace diskann {
       frontier_read_reqs.clear();
       cached_nhoods.clear();
       sector_scratch_idx = 0;
+
+#ifdef DYN_BEAM_WIDTH
+      // Update beam width using static policy based on search progress
+      constexpr _u32 kBeamWidths[] = {2, 2, 4, 4, 8, 8, 12, 12, 16};
+      cur_beam_width = kBeamWidths[std::min(max_marker / 5, 8u)];
+      // Ensure we don't exceed the maximum beam width
+      cur_beam_width = std::min(cur_beam_width, (_u32)beam_width);
+#endif
+
       // find new beam
       _u32 marker = k;
       _u32 num_seen = 0;
 
       // distribute cache and disk-read nodes
-      while (marker < cur_list_size && frontier.size() < beam_width &&
-             num_seen < beam_width) {
+      while (marker < cur_list_size && frontier.size() < cur_beam_width &&
+             num_seen < cur_beam_width) {
         const unsigned pid = id2page_[retset[marker].id];
         if (page_visited.find(pid) == page_visited.end() && retset[marker].flag) {
           num_seen++;
@@ -243,6 +263,9 @@ namespace diskann {
         }
         marker++;
       }
+
+      // Update max_marker for progress tracking
+      max_marker = std::max(max_marker, marker);
 
       // read nhoods of frontier ids
       if (!frontier.empty()) {
@@ -423,6 +446,14 @@ namespace diskann {
       throw ANNException("Beamwidth can not be higher than MAX_N_SECTOR_READS",
                          -1, __FUNCSIG__, __FILE__, __LINE__);
 
+    // Dynamic beam width - using static policy
+#ifdef DYN_BEAM_WIDTH
+    _u32 cur_beam_width = 4;  // start with small beam width
+#else
+    _u32 cur_beam_width = beam_width;  // use fixed beam width
+#endif
+    _u32 max_marker = 0;  // track search progress
+
     // lambda to batch compute query<-> node distances in PQ space
     auto compute_pq_dists = [this, pq_coord_scratch, pq_dists](const unsigned *ids,
                                                             const _u64 n_ids,
@@ -502,13 +533,22 @@ namespace diskann {
       frontier_read_reqs.clear();
       cached_nhoods.clear();
       sector_scratch_idx = 0;
+
+#ifdef DYN_BEAM_WIDTH
+      // Update beam width using static policy based on search progress
+      constexpr _u32 kBeamWidths[] = {4, 4, 8, 8, 16, 16, 24, 24, 32};
+      cur_beam_width = kBeamWidths[std::min(max_marker / 5, 8u)];
+      // Ensure we don't exceed the maximum beam width
+      cur_beam_width = std::min(cur_beam_width, (_u32)beam_width);
+#endif
+
       // find new beam
       _u32 marker = k;
       _u32 num_seen = 0;
 
       // distribute cache and disk-read nodes
-      while (marker < cur_list_size && frontier.size() < beam_width &&
-             num_seen < beam_width) {
+      while (marker < cur_list_size && frontier.size() < cur_beam_width &&
+             num_seen < cur_beam_width) {
         const unsigned pid = id2page_[retset[marker].id];
         if (page_visited.find(pid) == page_visited.end() && retset[marker].flag) {
           num_seen++;
@@ -527,6 +567,9 @@ namespace diskann {
         }
         marker++;
       }
+
+      // Update max_marker for progress tracking
+      max_marker = std::max(max_marker, marker);
 
       // read nhoods of frontier ids
       if (!frontier.empty()) {
@@ -743,6 +786,15 @@ namespace diskann {
 
     std::vector<Neighbor> full_retset;
     full_retset.reserve(4096);
+
+    // Dynamic beam width - using static policy
+#ifdef DYN_BEAM_WIDTH
+    _u32 cur_beam_width = 4;  // start with small beam width
+#else
+    _u32 cur_beam_width = beam_width;  // use fixed beam width
+#endif
+    _u32 max_marker = 0;  // track search progress
+
     _u32                        best_medoid = 0;
     float                       best_dist = (std::numeric_limits<float>::max)();
     std::vector<SimpleNeighbor> medoid_dists;
@@ -866,13 +918,22 @@ namespace diskann {
       frontier_read_reqs.clear();
       cached_nhoods.clear();
       sector_scratch_idx = 0;
+
+#ifdef DYN_BEAM_WIDTH
+      // Update beam width using static policy based on search progress
+      constexpr _u32 kBeamWidths[] = {4, 4, 8, 8, 16, 16, 24, 24, 32};
+      cur_beam_width = kBeamWidths[std::min(max_marker / 5, 8u)];
+      // Ensure we don't exceed the maximum beam width
+      cur_beam_width = std::min(cur_beam_width, (_u32)beam_width);
+#endif
+
       // find new beam
       _u32 marker = k;
       _u32 num_seen = 0;
 
       // distribute cache and disk-read nodes
-      while (marker < cur_list_size && frontier.size() < beam_width &&
-             num_seen < beam_width) {
+      while (marker < cur_list_size && frontier.size() < cur_beam_width &&
+             num_seen < cur_beam_width) {
         const unsigned pid = id2page_[retset[marker].id];
         if (page_visited.find(pid) == page_visited.end() && retset[marker].flag) {
           num_seen++;
@@ -891,6 +952,9 @@ namespace diskann {
         }
         marker++;
       }
+
+      // Update max_marker for progress tracking
+      max_marker = std::max(max_marker, marker);
 
       // read nhoods of frontier ids
       if (!frontier.empty()) {
