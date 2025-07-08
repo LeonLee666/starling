@@ -3,7 +3,7 @@
 set -e
 # set -x
 #source config_dataset.sh
-source config_sift1m.sh
+source config_sift100m_dataset.sh
 source config_params.sh
 
 INDEX_PREFIX_PATH="${PREFIX}_M${M}_R${R}_L${BUILD_L}_B${B}/"
@@ -53,7 +53,7 @@ case $2 in
   build)
     check_dir_and_make_if_absent ${INDEX_PREFIX_PATH}
     echo "Building disk index..."
-    time ${EXE_PATH}/tests/build_disk_index \
+    ${EXE_PATH}/tests/build_disk_index \
       --data_type $DATA_TYPE \
       --dist_fn $DIST_FN \
       --data_path $BASE_PATH \
@@ -62,12 +62,12 @@ case $2 in
       -L $BUILD_L \
       -B $B \
       -M $M \
-      -T $BUILD_T > ${INDEX_PREFIX_PATH}build.log
+      -T $BUILD_T 
     cp ${INDEX_PREFIX_PATH}_disk.index ${INDEX_PREFIX_PATH}_disk_beam_search.index
   ;;
   sq)
     cp  ${INDEX_PREFIX_PATH}_disk_beam_search.index ${INDEX_PREFIX_PATH}_disk.index 
-    time ${EXE_PATH}/tests/utils/sq ${INDEX_PREFIX_PATH} > ${INDEX_PREFIX_PATH}sq.log
+    ${EXE_PATH}/tests/utils/sq ${INDEX_PREFIX_PATH}
   ;;
   build_mem)
     if [ ${MEM_USE_FREQ} -eq 1 ]; then
@@ -76,24 +76,24 @@ case $2 in
         exit 1;
       fi
       echo "Parsing freq file..."
-      time ${EXE_PATH}/tests/utils/parse_freq_file ${DATA_TYPE} ${BASE_PATH} ${FREQ_PATH}_freq.bin ${FREQ_PATH} ${MEM_FREQ_USE_RATE} 
+      ${EXE_PATH}/tests/utils/parse_freq_file ${DATA_TYPE} ${BASE_PATH} ${FREQ_PATH}_freq.bin ${FREQ_PATH} ${MEM_FREQ_USE_RATE} 
       MEM_DATA_PATH=${FREQ_PATH}
     else
       mkdir -p ${MEM_SAMPLE_PATH}
       echo "Generating random slice..."
-      time ${EXE_PATH}/tests/utils/gen_random_slice $DATA_TYPE $BASE_PATH $MEM_SAMPLE_PATH $MEM_RAND_SAMPLING_RATE > ${MEM_SAMPLE_PATH}sample.log
+      ${EXE_PATH}/tests/utils/gen_random_slice $DATA_TYPE $BASE_PATH $MEM_SAMPLE_PATH $MEM_RAND_SAMPLING_RATE
       MEM_DATA_PATH=${MEM_SAMPLE_PATH}
     fi
     echo "Building memory index..."
     check_dir_and_make_if_absent ${MEM_INDEX_PATH}
-    time ${EXE_PATH}/tests/build_memory_index \
+    ${EXE_PATH}/tests/build_memory_index \
       --data_type ${DATA_TYPE} \
       --dist_fn ${DIST_FN} \
       --data_path ${MEM_DATA_PATH} \
       --index_path_prefix ${MEM_INDEX_PATH}_index \
       -R ${MEM_R} \
       -L ${MEM_BUILD_L} \
-      --alpha ${MEM_ALPHA} > ${MEM_INDEX_PATH}build.log
+      --alpha ${MEM_ALPHA}
   ;;
   freq)
     check_dir_and_make_if_absent ${FREQ_PATH}
@@ -105,7 +105,7 @@ case $2 in
     fi
 
     echo "Generating frequency file... ${FREQ_LOG}"
-    time ${EXE_PATH}/tests/search_disk_index_save_freq \
+    ${EXE_PATH}/tests/search_disk_index_save_freq \
               --data_type $DATA_TYPE \
               --dist_fn $DIST_FN \
               --index_path_prefix $INDEX_PREFIX_PATH \
@@ -121,7 +121,7 @@ case $2 in
               -W $FREQ_BM \
               --mem_L ${FREQ_MEM_L} \
               --use_page_search 0 \
-              --disk_file_path ${DISK_FILE_PATH} > ${FREQ_LOG}
+              --disk_file_path ${DISK_FILE_PATH}
   ;;
   gp)
     check_dir_and_make_if_absent ${GP_PATH}
@@ -138,15 +138,15 @@ case $2 in
     GP_FILE_PATH=${GP_PATH}_part.bin
     echo "Running graph partition... ${GP_FILE_PATH}.log"
     if [ ${GP_USE_FREQ} -eq 1 ]; then
-      time ${EXE_PATH}/graph_partition/partitioner --index_file ${OLD_INDEX_FILE} \
-        --data_type $GP_DATA_TYPE --gp_file $GP_FILE_PATH -T $GP_T --ldg_times $GP_TIMES --freq_file ${FREQ_PATH}_freq.bin --lock_nums ${GP_LOCK_NUMS} --cut ${GP_CUT} > ${GP_FILE_PATH}.log
+      ${EXE_PATH}/graph_partition/partitioner --index_file ${OLD_INDEX_FILE} \
+        --data_type $GP_DATA_TYPE --gp_file $GP_FILE_PATH -T $GP_T --ldg_times $GP_TIMES --freq_file ${FREQ_PATH}_freq.bin --lock_nums ${GP_LOCK_NUMS} --cut ${GP_CUT}
     else
-      time ${EXE_PATH}/graph_partition/partitioner --index_file ${OLD_INDEX_FILE} \
-        --data_type $GP_DATA_TYPE --gp_file $GP_FILE_PATH -T $GP_T --ldg_times $GP_TIMES > ${GP_FILE_PATH}.log
+      ${EXE_PATH}/graph_partition/partitioner --index_file ${OLD_INDEX_FILE} \
+        --data_type $GP_DATA_TYPE --gp_file $GP_FILE_PATH -T $GP_T --ldg_times $GP_TIMES
     fi
 
     echo "Running relayout... ${GP_PATH}relayout.log"
-    time ${EXE_PATH}/tests/utils/index_relayout ${OLD_INDEX_FILE} ${GP_FILE_PATH} > ${GP_PATH}relayout.log
+    ${EXE_PATH}/tests/utils/index_relayout ${OLD_INDEX_FILE} ${GP_FILE_PATH}
     if [ ! -f "${INDEX_PREFIX_PATH}_disk_beam_search.index" ]; then
       mv $OLD_INDEX_FILE ${INDEX_PREFIX_PATH}_disk_beam_search.index
     fi
@@ -224,7 +224,7 @@ case $2 in
               --use_page_search ${USE_PAGE_SEARCH} \
               --use_ratio ${PS_USE_RATIO} \
               --disk_file_path ${DISK_FILE_PATH} \
-              --use_sq ${USE_SQ}       > ${SEARCH_LOG} 
+              --use_sq ${USE_SQ}
             log_arr+=( ${SEARCH_LOG} )
           done
         done
@@ -254,8 +254,7 @@ case $2 in
               --mem_index_path ${MEM_INDEX_PATH}_index \
               --mem_L ${MEM_L} \
               --custom_round_num ${RS_CUSTOM_ROUND} \
-              --kicked_size ${KICKED_SIZE} \
-              > ${SEARCH_LOG}
+              --kicked_size ${KICKED_SIZE}
             log_arr+=( ${SEARCH_LOG} )
           done
         done

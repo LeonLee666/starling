@@ -8,8 +8,8 @@
 #   Disk Build   #
 ##################
 R=64
-BUILD_L=128
-M=32
+BUILD_L=125
+M=50
 BUILD_T=48
 
 ##################
@@ -23,7 +23,7 @@ USE_SQ=0
 MEM_R=48
 MEM_BUILD_L=128
 MEM_ALPHA=1.2
-MEM_RAND_SAMPLING_RATE=0.01
+MEM_RAND_SAMPLING_RATE=0.0001
 MEM_USE_FREQ=0
 MEM_FREQ_USE_RATE=0.01
 
@@ -43,7 +43,7 @@ FREQ_MEM_TOPK=10
 #   Graph Partition   #
 #######################
 GP_TIMES=16
-GP_T=16
+GP_T=48
 GP_LOCK_NUMS=0 # will lock nodes at init, the lock_node_nums = partition_size * GP_LOCK_NUMS
 GP_USE_FREQ=0 # use freq file to partition graph
 GP_CUT=4096 # the graph's degree will been limited at 4096
@@ -59,7 +59,7 @@ MEM_L=0 # non-zero to enable
 
 # Page Search
 USE_PAGE_SEARCH=0 # Set 0 for beam search, 1 for page search (default)
-PS_USE_RATIO=1.0
+PS_USE_RATIO=1
 
 # KNN
 LS="10 20 30 40 50 60 70 80 90 100"
