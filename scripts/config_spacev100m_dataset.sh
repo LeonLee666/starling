@@ -1,0 +1,10 @@
+BASE_PATH=/fast/liliang/spacev/spacev100m.bin
+QUERY_FILE=/fast/liliang/spacev/query.bin
+GT_FILE=/fast/liliang/spacev/truth.bin
+PREFIX=spacev_100m
+DATA_TYPE=int8
+DIST_FN=l2
+B=4
+K=10
+DATA_DIM=100
+DATA_N=100000000

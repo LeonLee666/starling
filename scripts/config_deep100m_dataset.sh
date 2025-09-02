@@ -1,0 +1,10 @@
+BASE_PATH=/fast/liliang/deep1b/deep100m.fbin
+QUERY_FILE=/fast/liliang/deep1b/query.public.10K.fbin
+GT_FILE=/fast/liliang/deep1b/deep100m_gt100
+PREFIX=deep_100m
+DATA_TYPE=float
+DIST_FN=l2
+B=4
+K=10
+DATA_DIM=96
+DATA_N=100000000
