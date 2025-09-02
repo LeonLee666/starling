@@ -23,7 +23,7 @@ USE_SQ=0
 MEM_R=48
 MEM_BUILD_L=128
 MEM_ALPHA=1.2
-MEM_RAND_SAMPLING_RATE=0.0001
+MEM_RAND_SAMPLING_RATE=0.01
 MEM_USE_FREQ=0
 MEM_FREQ_USE_RATE=0.01
 
@@ -55,7 +55,7 @@ GP_CUT=4096 # the graph's degree will been limited at 4096
 BM_LIST=(8)
 T_LIST=(48)
 CACHE=0
-MEM_L=0 # non-zero to enable
+MEM_L=1 # non-zero to enable
 
 # Page Search
 USE_PAGE_SEARCH=0 # Set 0 for beam search, 1 for page search (default)

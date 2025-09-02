@@ -3,7 +3,7 @@
 set -e
 # set -x
 #source config_dataset.sh
-source config_sift100m_dataset.sh
+source config_sift1m_dataset.sh
 source config_params.sh
 
 INDEX_PREFIX_PATH="${PREFIX}_M${M}_R${R}_L${BUILD_L}_B${B}/"
@@ -208,7 +208,7 @@ case $2 in
           do
             SEARCH_LOG=${INDEX_PREFIX_PATH}search/search_SQ${USE_SQ}_K${K}_CACHE${CACHE}_BW${BW}_T${T}_MEML${MEM_L}_MEMK${MEM_TOPK}_MEM_USE_FREQ${MEM_USE_FREQ}_PS${USE_PAGE_SEARCH}_USE_RATIO${PS_USE_RATIO}_GP_USE_FREQ{$GP_USE_FREQ}_GP_LOCK_NUMS${GP_LOCK_NUMS}_GP_CUT${GP_CUT}.log
             echo "Searching... log file: ${SEARCH_LOG}"
-            sync; echo 3 | sudo tee /proc/sys/vm/drop_caches; ${EXE_PATH}/tests/search_disk_index --data_type $DATA_TYPE \
+            ${EXE_PATH}/tests/search_disk_index --data_type $DATA_TYPE \
               --dist_fn $DIST_FN \
               --index_path_prefix $INDEX_PREFIX_PATH \
               --query_file $QUERY_FILE \
@@ -236,7 +236,7 @@ case $2 in
           do
             SEARCH_LOG=${INDEX_PREFIX_PATH}search/search_RADIUS${RADIUS}_CACHE${CACHE}_BW${BW}_T${T}_PS${USE_PAGE_SEARCH}_PS_RATIO${PS_USE_RATIO}_ITER_KNN${RS_ITER_KNN_TO_RANGE_SEARCH}_MEM_L${MEM_L}.log
             echo "Searching... log file: ${SEARCH_LOG}"
-            sync; echo 3 | sudo tee /proc/sys/vm/drop_caches; ${EXE_PATH}/tests/range_search_disk_index \
+            ${EXE_PATH}/tests/range_search_disk_index \
               --data_type $DATA_TYPE \
               --dist_fn $DIST_FN \
               --index_path_prefix $INDEX_PREFIX_PATH \
