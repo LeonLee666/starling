@@ -1,0 +1,10 @@
+BASE_PATH=../../../datasets/sift/sift_base.fbin
+QUERY_FILE=../../../datasets/sift/sift_query.fbin
+GT_FILE=../../../datasets/sift/sift_query_base_gt100
+PREFIX=sift1m_idx
+DATA_TYPE=float
+DIST_FN=l2
+B=0.02
+K=10
+DATA_DIM=128
+DATA_N=1000000

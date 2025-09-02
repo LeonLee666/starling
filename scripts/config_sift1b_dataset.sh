@@ -1,0 +1,10 @@
+BASE_PATH=/fast/liliang/DiskANN/build/data/big_sift/bigann_base.bin
+QUERY_FILE=/fast/liliang/DiskANN/build/data/big_sift/bigann_query.bin
+GT_FILE=/fast/liliang/DiskANN/build/data/big_sift/bigann_query_base_gt100
+PREFIX=sift_1b
+DATA_TYPE=uint8
+DIST_FN=l2
+B=35
+K=10
+DATA_DIM=128
+DATA_N=1000000000
