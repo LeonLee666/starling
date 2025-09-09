@@ -51,8 +51,25 @@ int main(int argc, char **argv) {
     std::cerr << ex.what() << "\n";
   }
   omp_set_num_threads(thead_nums);
-  GP::graph_partitioner partitioner(index_file.c_str(), data_type.c_str(), use_disk, block_size, visual,
-                                    freq_file, cut);
-  partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
+  
+  // Create graph partitioner based on data type
+  if (data_type == "float") {
+    GP::graph_partitioner<float> partitioner(index_file.c_str(), data_type.c_str(), use_disk, block_size, visual,
+                                            freq_file, cut, true, 60);
+    partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
+  } else if (data_type == "uint8") {
+    GP::graph_partitioner<uint8_t> partitioner(index_file.c_str(), data_type.c_str(), use_disk, block_size, visual,
+                                              freq_file, cut, true, 60);
+    partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
+  } else if (data_type == "int8") {
+    GP::graph_partitioner<int8_t> partitioner(index_file.c_str(), data_type.c_str(), use_disk, block_size, visual,
+                                             freq_file, cut, true, 60);
+    partitioner.graph_partition(gp_file.c_str(), ldg_times, lock_nums);
+  } else {
+    std::cerr << "Unsupported data type: " << data_type << std::endl;
+    std::cerr << "Supported types: float, uint8, int8" << std::endl;
+    return 1;
+  }
+  
   return 0;
 }
