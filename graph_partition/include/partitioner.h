@@ -33,8 +33,10 @@
 #include <vector>
 #include "filesystem"
 #include "freq_relayout.h"
+#include "../../include/pq_table.h"
 #include "../../include/distance.h"
 #include "../../include/pq_flash_index_utils.h"
+#include "../../include/utils.h"
 #include <type_traits>
 
 #ifndef INF
@@ -105,10 +107,9 @@ class graph_partitioner {
   graph_partitioner(const char *indexName, const char *data_type = "uint8",
                     bool load_disk = true, unsigned BS = 1, bool visual = false,
                     std::string freq_file = std::string(""), unsigned cut = INF,
-                    bool build_knn_graph = false, unsigned knn_k = 10) {
+                    bool build_knn_graph = false) {
     _visual = visual;
     _build_knn_graph = build_knn_graph;
-    _knn_k = knn_k;
     std::srand(static_cast<unsigned int>(std::time(nullptr)));
 
     // check file size
@@ -151,11 +152,8 @@ class graph_partitioner {
     
     // Build KNN graph if requested (before copying to direct_graph)
     if (_build_knn_graph) {
-      std::cout << "Building KNN graph with k=" << _knn_k << "..." << std::endl;
+      std::cout << "Building KNN graph with k=" << C << "..." << std::endl;
       this->build_knn_graph();
-      // free memory of quantized data
-      _pq_data.clear(); 
-      std::cout << "KNN graph construction completed." << std::endl;
     }
     
     // copy to direct_graph
@@ -221,12 +219,6 @@ class graph_partitioner {
     }
   }
 
-  /**
-   * Build KNN graph by replacing each node's neighbors with its k nearest neighbors
-   * Uses two-phase approach to ensure thread safety:
-   * Phase 1: Parallel computation of KNN results (read-only access to graph)
-   * Phase 2: Sequential update of graph structure
-   */
   void build_knn_graph() {
     if (!_build_knn_graph) return;
     
@@ -239,7 +231,7 @@ class graph_partitioner {
     
     #pragma omp parallel for schedule(dynamic, 100)
     for (_u64 i = 0; i < _nd; ++i) {
-      if (i % 10000 == 0) {
+      if (i % 100000 == 0) {
         #pragma omp critical
         {
           std::cout << "Processing node " << i << "/" << _nd << std::endl;
@@ -247,7 +239,7 @@ class graph_partitioner {
       }
       
       // Best First Search to find k nearest neighbors (read-only access to full_graph)
-      knn_results[i] = best_first_search_knn(i, _knn_k);
+      knn_results[i] = best_first_search_knn(i, C);
     }
     
     // Phase 2: Sequential update of graph structure (thread-safe)
@@ -256,9 +248,6 @@ class graph_partitioner {
       full_graph[i].clear();
       full_graph[i].assign(knn_results[i].begin(), knn_results[i].end());
     }
-    
-    // full_graph has been updated with KNN neighbors
-    // direct_graph will be updated later in the constructor
     
     std::cout << "KNN graph construction completed. Average degree: " 
               << (double)std::accumulate(full_graph.begin(), full_graph.end(), 0, 
@@ -282,58 +271,80 @@ class graph_partitioner {
       bool operator>(const Candidate& other) const {
         return distance > other.distance;
       }
+      // Define operator< so default priority_queue becomes a max-heap by distance
+      bool operator<(const Candidate& other) const {
+        return distance < other.distance;
+      }
     };
     
+    // Min-heap over candidates to expand (smallest distance first)
     std::priority_queue<Candidate, std::vector<Candidate>, std::greater<Candidate>> pq;
+    // Max-heap to maintain current k nearest neighbors (largest distance on top)
+    std::priority_queue<Candidate> knn_heap;
     std::set<_u64> visited;
     std::vector<unsigned> knn_neighbors;
     knn_neighbors.reserve(k);
     
+    // If using disk PQ, inflate query once to a temporary float vector for reuse
+    std::unique_ptr<float[]> query_inflated;
+    if (_use_disk_pq && _n_chunks > 0) {
+      query_inflated.reset(new float[_dim]());
+      const _u8* query_code = _pq_codes.data() + query_id * _n_chunks;
+      _pq_table.inflate_vector(const_cast<_u8*>(query_code), query_inflated.get());
+    }
+    
     // Initialize with direct neighbors
     for (auto neighbor : full_graph[query_id]) {
       if (neighbor != query_id) {
-        float dist = compute_quantized_distance(query_id, neighbor);
+        float dist;
+        if (_use_disk_pq && query_inflated) {
+          const _u8* nb_code = _pq_codes.data() + (_u64)neighbor * _n_chunks;
+          dist = _pq_table.l2_distance(query_inflated.get(), const_cast<_u8*>(nb_code));
+        } else {
+          dist = compute_quantized_distance(query_id, neighbor);
+        }
         pq.push(Candidate(neighbor, dist));
       }
     }
     
     // Best First Search
-    const _u64 max_search_depth = k * 5;  // Limit search depth
-    _u64 search_count = 0;
-    
-    while (!pq.empty() && knn_neighbors.size() < k && search_count < max_search_depth) {
+    const _u64 max_hop = 200;  // Limit search depth
+    _u64 hop = 0;
+    while (!pq.empty() && hop < max_hop) {
       Candidate current = pq.top();
       pq.pop();
       
       if (visited.count(current.node_id)) continue;
       visited.insert(current.node_id);
-      search_count++;
+      hop++;
       
-      // Add to results
-      knn_neighbors.push_back(current.node_id);
+      // Maintain top-k nearest neighbors using a max-heap by distance
+      if (knn_heap.size() < k) {
+        knn_heap.push(current);
+      } else if (current.distance < knn_heap.top().distance) {
+        knn_heap.pop();
+        knn_heap.push(current);
+      }
       
       // Expand: add neighbors of current node
       for (auto next_neighbor : full_graph[current.node_id]) {
         if (next_neighbor != query_id && !visited.count(next_neighbor)) {
-          float dist = compute_quantized_distance(query_id, next_neighbor);
+          float dist;
+          if (_use_disk_pq && query_inflated) {
+            const _u8* nb_code = _pq_codes.data() + (_u64)next_neighbor * _n_chunks;
+            dist = _pq_table.l2_distance(query_inflated.get(), const_cast<_u8*>(nb_code));
+          } else {
+            dist = compute_quantized_distance(query_id, next_neighbor);
+          }
           pq.push(Candidate(next_neighbor, dist));
         }
       }
     }
     
-    // If we don't have enough neighbors, add random ones
-    if (knn_neighbors.size() < k) {
-      std::random_device rd;
-      std::mt19937 gen(rd());
-      std::uniform_int_distribution<> dis(0, _nd - 1);
-      
-      while (knn_neighbors.size() < k) {
-        _u64 random_id = dis(gen);
-        if (random_id != query_id && 
-            std::find(knn_neighbors.begin(), knn_neighbors.end(), random_id) == knn_neighbors.end()) {
-          knn_neighbors.push_back(random_id);
-        }
-      }
+    // Extract results from max-heap into output vector
+    while (!knn_heap.empty()) {
+      knn_neighbors.push_back(knn_heap.top().node_id);
+      knn_heap.pop();
     }
     
     return knn_neighbors;
@@ -344,22 +355,15 @@ class graph_partitioner {
    * Compute quantized distance between two nodes
    */
   float compute_quantized_distance(_u64 node1, _u64 node2) {
-    if (_pq_data.empty() || _n_chunks == 0) {
-      return std::numeric_limits<float>::max();
+    // strictly use disk PQ path; otherwise return large value
+    if (_use_disk_pq && _n_chunks > 0 && !_pq_codes.empty()) {
+      std::unique_ptr<float[]> node1_fp(new float[_dim]());
+      const _u8* code1 = _pq_codes.data() + node1 * _n_chunks;
+      _pq_table.inflate_vector(const_cast<_u8*>(code1), node1_fp.get());
+      const _u8* code2 = _pq_codes.data() + node2 * _n_chunks;
+      return _pq_table.l2_distance(node1_fp.get(), const_cast<_u8*>(code2));
     }
-    
-    float distance = 0.0f;
-    
-    // Compute L2 distance using quantized coordinates
-    for (_u64 chunk = 0; chunk < _n_chunks; ++chunk) {
-      _u8 coord1 = _pq_data[node1 * _n_chunks + chunk];
-      _u8 coord2 = _pq_data[node2 * _n_chunks + chunk];
-      
-      // Simple L2 distance on quantized coordinates
-      float diff = static_cast<float>(coord1) - static_cast<float>(coord2);
-      distance += diff * diff;
-    }
-    return distance;
+    return std::numeric_limits<float>::max();
   }
   /**
    * load vamana graph index from disk
@@ -454,12 +458,48 @@ class graph_partitioner {
       
       full_graph.resize(_nd);
       if (_build_knn_graph) {
-        // Load quantized data instead of original data for memory efficiency
-        _n_chunks = _dim / 8;  // Assume 8 dimensions per chunk
-        if (_n_chunks == 0) _n_chunks = 1;
-        _pq_data.resize(_nd * _n_chunks);
-        std::cout << "Allocated quantized data: " << _pq_data.size() << " elements, " 
-                  << _n_chunks << " chunks per vector" << std::endl;
+        // Load PQ metadata from _pq_pivots.bin and compressed codes from _pq_compressed.bin
+        // Build paths relative to the directory of the index file, e.g. <dir>/_pq_pivots.bin
+        fs::path index_path(index_name);
+        std::string index_dir = index_path.parent_path().string();
+        if (index_dir.empty()) index_dir = ".";
+        std::string pq_pivots = (fs::path(index_dir) / "_pq_pivots.bin").string();
+        std::string pq_codes  = (fs::path(index_dir) / "_pq_compressed.bin").string();
+
+        // load pq pivots (codebooks) and infer n_chunks
+        try {
+          _pq_table.load_pq_centroid_bin(pq_pivots.c_str(), 0);
+          _n_chunks = _pq_table.get_num_chunks();
+        } catch (...) {
+          std::cout << "Failed to load PQ pivots from: " << pq_pivots << std::endl;
+          exit(-1);
+        }
+        if (_n_chunks == 0) {
+          std::cout << "Invalid PQ n_chunks (0) from pivots." << std::endl;
+          exit(-1);
+        }
+        // load compressed pq codes (nd * n_chunks, uint8) via DiskANN loader
+        {
+          _u8* codes_ptr = nullptr;
+          _u64 nr = 0, nc = 0;
+          try {
+            diskann::load_bin<_u8>(pq_codes, codes_ptr, nr, nc);
+          } catch (std::exception &e) {
+            std::cout << "Failed to load PQ codes from: " << pq_codes << " error: " << e.what() << std::endl;
+            exit(-1);
+          }
+          if (nr != _nd || nc != _n_chunks) {
+            std::cout << "PQ codes shape mismatch. expect (nd, n_chunks)=(" << _nd << "," << _n_chunks
+                      << ") but got (" << nr << "," << nc << ")" << std::endl;
+            delete[] codes_ptr;
+            exit(-1);
+          }
+          _pq_codes.resize((_u64)nr * nc);
+          std::memcpy(_pq_codes.data(), codes_ptr, (_u64)nr * nc * sizeof(_u8));
+          delete[] codes_ptr;
+        }
+        _use_disk_pq = true;
+        std::cout << "Loaded PQ: chunks=" << _n_chunks << ", codes=" << _pq_codes.size() << std::endl;
       }
       _u64 des = 0;
       
@@ -478,26 +518,7 @@ class graph_partitioner {
           memcpy((char *)tmp.data(), nhood_buf, nnbr * sizeof(unsigned));
           full_graph[i * C + j].assign(tmp.begin(), tmp.end());
           
-          // Store quantized vector data for KNN construction
-          if (_build_knn_graph) {
-            _u64 node_id = i * C + j;
-            // Create simple quantized representation by sampling coordinates
-            for (_u64 chunk = 0; chunk < _n_chunks; ++chunk) {
-              _u64 start_dim = chunk * 8;
-              _u64 end_dim = std::min(start_dim + 8, (_u64)_dim);
-              
-              // Simple quantization: average the coordinates in each chunk
-              float sum = 0.0f;
-              for (_u64 d = start_dim; d < end_dim; ++d) {
-                U* coord_ptr = (U*)(node_buf.get() + d * sizeof(U));
-                sum += static_cast<float>(*coord_ptr);
-              }
-              
-              // Quantize to 8-bit
-              _u8 quantized_value = static_cast<_u8>(std::min(255.0f, std::max(0.0f, sum / (end_dim - start_dim) + 128.0f)));
-              _pq_data[node_id * _n_chunks + chunk] = quantized_value;
-            }
-          }
+          // no longer synthesize PQ data here; codes already loaded from disk
         }
       }
       in.close();
@@ -845,10 +866,12 @@ class graph_partitioner {
   
   // KNN graph building parameters
   bool _build_knn_graph = false;
-  unsigned _knn_k = 10;
   std::vector<T> _data;  // Store original data for distance calculations
   std::unique_ptr<diskann::Distance<T>> _dist_cmp;
-  std::vector<_u8> _pq_data;  // PQ quantized data
   _u64 _n_chunks = 0;  // Number of PQ chunks
+  // Disk PQ resources
+  bool _use_disk_pq = false;
+  std::vector<_u8> _pq_codes;  // size: _nd * _n_chunks
+  diskann::FixedChunkPQTable _pq_table;
 };
 }  // namespace GP

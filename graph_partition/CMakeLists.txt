@@ -21,5 +21,12 @@ endif()
 find_package(Boost COMPONENTS program_options REQUIRED)
 
 add_executable(partitioner src/partitioner.cpp)
-target_link_libraries(partitioner PUBLIC tbb Boost::program_options)
+target_link_libraries(partitioner PUBLIC tbb Boost::program_options diskann)
+
+# Enable AVX2 for this target on GCC/Clang to avoid ABI warnings and ensure
+# availability of 256-bit intrinsics used in headers.
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(partitioner PRIVATE -mavx2 -mfma)
+    target_compile_definitions(partitioner PRIVATE USE_AVX2)
+endif()
 
