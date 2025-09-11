@@ -239,7 +239,7 @@ class graph_partitioner {
       }
       
       // Best First Search to find k nearest neighbors (read-only access to full_graph)
-      knn_results[i] = best_first_search_knn(i, C);
+      knn_results[i] = best_first_search_knn(i, C/2);
     }
     
     // Phase 2: Sequential update of graph structure (thread-safe)
