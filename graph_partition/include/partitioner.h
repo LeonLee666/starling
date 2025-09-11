@@ -767,14 +767,16 @@ class graph_partitioner {
 
     std::cout << "init over." << std::endl;
 
+    build_undirected_graph();
     for (int i = 0; i < k; i++) {
-      select_free = 0;
-      graph_partition_LDG();
-      std::cout << "select free: " << (double)select_free / _partition_number << std::endl;
+      auto t0 = omp_get_wtime();
+      graph_partition_min_cut_round();
+      auto t1 = omp_get_wtime();
+      ivf_time += (t1 - t0);
       partition_statistic();
       auto ivf_file_name = std::string(filename) + std::string(".ivf") + std::to_string(i + 1);
-      std::cout << "total ivf time: " << ivf_time << std::endl;
       save_partition(ivf_file_name.c_str());
+      std::cout << "ivf time: " << t1 - t0 << " round: " << i + 1 << std::endl;
     }
     save_partition(filename);
     std::cout << "select pid nums" << select_nums << " get unfilled partition nums: " << getUnfilled_nums << std::endl;
@@ -829,7 +831,216 @@ class graph_partitioner {
     return pid;
   }
 
- private:
+  // 基于direct_graph与reverse_graph构建无向图
+  void build_undirected_graph() {
+    undirect_graph.clear();
+    undirect_graph.resize(_nd);
+#pragma omp parallel for schedule(dynamic, 100)
+    for (unsigned i = 0; i < _nd; i++) {
+      std::unordered_set<unsigned> ne;
+      ne.reserve(direct_graph[i].size() + reverse_graph[i].size());
+      for (auto n : direct_graph[i]) {
+        if (n != i) ne.insert(n);
+      }
+      for (auto n : reverse_graph[i]) {
+        if (n != i) ne.insert(n);
+      }
+      undirect_graph[i].assign(ne.begin(), ne.end());
+    }
+    std::cout << "undirected graph built." << std::endl;
+  }
+
+  // 边权：距离的反比，越近越大。仅在无向图存在边时计权
+  inline float edge_weight(unsigned a, unsigned b) {
+    if (a == b) return 0.0f;
+    const auto &adj = undirect_graph[a];
+    bool connected = false;
+    for (auto v : adj) {
+      if (v == b) { connected = true; break; }
+    }
+    if (!connected) return 0.0f;
+    float d = 0.0f;
+    if (_use_disk_pq && _n_chunks > 0) {
+      static thread_local std::vector<float> a_fp;
+      static thread_local _u64 last_id = std::numeric_limits<_u64>::max();
+      if (last_id != a) {
+        if (a_fp.size() != _dim) a_fp.assign(_dim, 0.0f);
+        const _u8 *code1 = _pq_codes.data() + (_u64)a * _n_chunks;
+        _pq_table.inflate_vector(const_cast<_u8*>(code1), a_fp.data());
+        last_id = a;
+      }
+      const _u8 *code2 = _pq_codes.data() + (_u64)b * _n_chunks;
+      d = _pq_table.l2_distance(a_fp.data(), const_cast<_u8*>(code2));
+    } else {
+      d = compute_quantized_distance(a, b);
+    }
+    if (!std::isfinite(d) || d <= 0.f) d = 1e-6f;
+    return 1.0f / (1e-6f + d);
+  }
+ 
+  // 为每个分区挑选Top-M最重的邻接分区，并做贪心配对，生成互不冲突的分区对
+  std::vector<std::pair<unsigned, unsigned>> build_disjoint_heavy_pairs(unsigned topM_per_partition = 1) {
+    std::vector<std::vector<std::pair<unsigned, float>>> heavy_neighbors(_partition_number);
+#pragma omp parallel for schedule(dynamic, 64)
+    for (int pid = 0; pid < (int)_partition_number; ++pid) {
+      if (_lock_pids.size() && _lock_pids[pid]) continue;
+      const auto &nodes = _partition[pid];
+      if (nodes.empty()) continue;
+      std::unordered_map<unsigned, float> cut_w;
+      for (auto u : nodes) {
+        for (auto v : undirect_graph[u]) {
+          unsigned pj = id2pid[v];
+          if (pj == INF || pj == (unsigned)pid) continue;
+          if (_lock_pids.size() && _lock_pids[pj]) continue;
+          float w = edge_weight(u, v);
+          if (w <= 0) continue;
+          cut_w[pj] += w;
+        }
+      }
+      std::vector<std::pair<unsigned, float>> list(cut_w.begin(), cut_w.end());
+      std::sort(list.begin(), list.end(), [](const auto &a, const auto &b){ return a.second > b.second; });
+      if (list.size() > topM_per_partition) list.resize(topM_per_partition);
+      heavy_neighbors[pid] = std::move(list);
+    }
+
+    std::vector<char> used(_partition_number, 0);
+    std::vector<std::pair<unsigned, unsigned>> pairs;
+    pairs.reserve(_partition_number / 2);
+    for (unsigned i = 0; i < _partition_number; ++i) {
+      if (used[i]) continue;
+      if (_lock_pids.size() && _lock_pids[i]) continue;
+      const auto &nei = heavy_neighbors[i];
+      for (const auto &pr : nei) {
+        unsigned j = pr.first;
+        if (i == j || used[j]) continue;
+        if (_lock_pids.size() && _lock_pids[j]) continue;
+        pairs.emplace_back(i, j);
+        used[i] = used[j] = 1;
+        break;
+      }
+    }
+    return pairs;
+  }
+
+  // 单轮KL/FM交换优化：保持每块容量不变
+  void graph_partition_min_cut_round() {
+    auto pairs = build_disjoint_heavy_pairs(1);
+#pragma omp parallel for schedule(dynamic, 64)
+    for (int idx = 0; idx < (int)pairs.size(); ++idx) {
+      auto pr = pairs[idx];
+      kl_optimize_pair(pr.first, pr.second);
+    }
+  }
+
+  // KL在两个分区之间做等量交换
+  void kl_optimize_pair(unsigned pid_a, unsigned pid_b) {
+    auto &A = _partition[pid_a];
+    auto &B = _partition[pid_b];
+    if (A.empty() || B.empty()) return;
+    if (A.size() != B.size()) return;  // 简化：仅处理等大小块
+    const size_t P = A.size();
+
+    std::unordered_set<unsigned> setA(A.begin(), A.end());
+    std::unordered_set<unsigned> setB(B.begin(), B.end());
+
+    std::vector<float> D_A(P, 0.0f), D_B(P, 0.0f);
+    auto recompute_D = [&](bool forA) {
+      if (forA) {
+#pragma omp parallel for schedule(dynamic, 32)
+        for (int ii = 0; ii < (int)P; ++ii) {
+          unsigned u = A[ii];
+          float in_w = 0.0f, ex_w = 0.0f;
+          for (auto v : undirect_graph[u]) {
+            if (setA.count(v)) {
+              in_w += edge_weight(u, v);
+            } else if (setB.count(v)) {
+              ex_w += edge_weight(u, v);
+            }
+          }
+          D_A[ii] = ex_w - in_w;
+        }
+      } else {
+#pragma omp parallel for schedule(dynamic, 32)
+        for (int ii = 0; ii < (int)P; ++ii) {
+          unsigned u = B[ii];
+          float in_w = 0.0f, ex_w = 0.0f;
+          for (auto v : undirect_graph[u]) {
+            if (setB.count(v)) {
+              in_w += edge_weight(u, v);
+            } else if (setA.count(v)) {
+              ex_w += edge_weight(u, v);
+            }
+          }
+          D_B[ii] = ex_w - in_w;
+        }
+      }
+    };
+
+    recompute_D(true);
+    recompute_D(false);
+
+    std::vector<int> chosenA; chosenA.reserve(P);
+    std::vector<int> chosenB; chosenB.reserve(P);
+    std::vector<float> gains; gains.reserve(P);
+    std::vector<char> lockedA(P, 0), lockedB(P, 0);
+
+    for (size_t step = 0; step < P; ++step) {
+      int best_ai = -1, best_bi = -1;
+      float best_gain = -std::numeric_limits<float>::infinity();
+      for (size_t ai = 0; ai < P; ++ai) {
+        if (lockedA[ai]) continue;
+        unsigned a = A[ai];
+        for (size_t bi = 0; bi < P; ++bi) {
+          if (lockedB[bi]) continue;
+          unsigned b = B[bi];
+          float g = D_A[ai] + D_B[bi] - 2.0f * edge_weight(a, b);
+          if (g > best_gain) {
+            best_gain = g; best_ai = (int)ai; best_bi = (int)bi;
+          }
+        }
+      }
+      if (best_ai < 0 || best_bi < 0) break;
+      chosenA.push_back(best_ai);
+      chosenB.push_back(best_bi);
+      gains.push_back(best_gain);
+      lockedA[best_ai] = 1; lockedB[best_bi] = 1;
+
+      unsigned va = A[best_ai], vb = B[best_bi];
+      setA.erase(va); setB.erase(vb);
+      setA.insert(vb); setB.insert(va);
+      recompute_D(true);
+      recompute_D(false);
+    }
+
+    float best_sum = -std::numeric_limits<float>::infinity();
+    int best_k = -1; float acc = 0.0f;
+    for (size_t i = 0; i < gains.size(); ++i) {
+      acc += gains[i];
+      if (acc > best_sum) { best_sum = acc; best_k = (int)i + 1; }
+    }
+    if (best_k <= 0 || best_sum <= 1e-6f) return;
+
+    std::unordered_set<unsigned> newA(A.begin(), A.end());
+    std::unordered_set<unsigned> newB(B.begin(), B.end());
+    for (int i = 0; i < best_k; ++i) {
+      unsigned va = A[chosenA[i]];
+      unsigned vb = B[chosenB[i]];
+      newA.erase(va); newB.erase(vb);
+      newA.insert(vb); newB.insert(va);
+    }
+
+    std::vector<unsigned> A_new; A_new.reserve(P);
+    std::vector<unsigned> B_new; B_new.reserve(P);
+    for (auto x : newA) A_new.push_back(x);
+    for (auto x : newB) B_new.push_back(x);
+    if (A_new.size() != P || B_new.size() != P) return;
+
+    A.swap(A_new); B.swap(B_new);
+    for (auto x : A) id2pid[x] = pid_a;
+    for (auto x : B) id2pid[x] = pid_b;
+  }
+
+private:
   size_t _dim;  // vector dimension
   _u64 _nd;     // vector number
   _u64 _max_node_len;
