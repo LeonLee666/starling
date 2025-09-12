@@ -42,9 +42,11 @@ case $1 in
     print_usage_and_exit
   ;;
 esac
+if [ $# -eq 1 ]; then
 pushd $EXE_PATH
 make -j
 popd
+fi
 
 mkdir -p ../indices && cd ../indices
 
