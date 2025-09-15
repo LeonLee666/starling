@@ -7,6 +7,7 @@
 #include "timer.h"
 
 #define DYN_BEAM_WIDTH
+#define ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
 
 namespace diskann {
   template<typename T>
@@ -216,9 +217,19 @@ namespace diskann {
         cached_nhoods;
     cached_nhoods.reserve(2 * beam_width);
 
+    std::vector<std::pair<unsigned, char *>> page_cached_nhoods;
+    page_cached_nhoods.reserve(2 * beam_width);
+    std::vector<unsigned> page_cache_release_pids;
+  
     std::vector<unsigned> last_io_ids;
     last_io_ids.reserve(2 * beam_width);
     std::vector<char> last_pages(SECTOR_LEN * beam_width * 2);
+#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
+    std::vector<char*> last_page_ptrs; 
+    std::vector<bool> last_page_from_pool; 
+    last_page_ptrs.reserve(2 * beam_width);
+    last_page_from_pool.reserve(2 * beam_width);
+#endif
     int n_ops = 0;
 
     while (k < cur_list_size && num_ios < io_limit) {
@@ -246,8 +257,22 @@ namespace diskann {
       while (marker < cur_list_size && frontier.size() < cur_beam_width &&
              num_seen < cur_beam_width) {
         const unsigned pid = id2page_[retset[marker].id];
-        if (page_visited.find(pid) == page_visited.end() && retset[marker].flag) {
+        if (retset[marker].flag && page_visited.find(pid) == page_visited.end()) {
           num_seen++;
+
+          char* cached_page_buf = page_pool_.enter_page(pid);
+          if (cached_page_buf != nullptr) {
+            page_cached_nhoods.emplace_back(pid, cached_page_buf);
+            page_cache_release_pids.push_back(pid);
+            page_visited.insert(pid);
+            retset[marker].flag = false;
+            if (stats != nullptr) {
+              stats->n_cache_hits++;
+            }
+            marker++;
+            continue;
+          }
+
           auto iter = nhood_cache.find(retset[marker].id);
           if (iter != nhood_cache.end()) {
             cached_nhoods.push_back(
@@ -300,7 +325,11 @@ namespace diskann {
       // compute remaining nodes in the pages that are fetched in the previous round
       for (size_t i = 0; i < last_io_ids.size(); ++i) {
         const unsigned last_io_id = last_io_ids[i];
-        char    *sector_buf = last_pages.data() + i * SECTOR_LEN;
+#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
+        char    *sector_buf = last_page_ptrs[i]; // 使用指针数组代替copy的数据
+#else
+        char    *sector_buf = last_pages.data() + i * SECTOR_LEN; // 传统方式：直接使用固定缓冲区
+#endif
         const unsigned pid = id2page_[last_io_id];
         const unsigned p_size = gp_layout_[pid].size();
         // minus one for the vector that is computed previously
@@ -308,13 +337,22 @@ namespace diskann {
         std::vector<std::pair<float, const char*>> vis_cand;
         vis_cand.reserve(p_size);
 
-        // compute exact distances of the vectors within the page
+        // 优化：直接在原地址计算距离，避免额外开销
         for (unsigned j = 0; j < p_size; ++j) {
           const unsigned id = gp_layout_[pid][j];
           if (id == last_io_id) continue;
+          
           const char* node_buf = sector_buf + j * max_node_len;
-          float dist = compute_extact_dists_and_push(node_buf, id);
-          vis_cand.emplace_back(dist, node_buf);
+          const T* node_coords = (const T*)node_buf;  // 直接转换，避免memcpy
+          
+          // 预取下一个节点数据
+          if (j + 1 < p_size) {
+            _mm_prefetch(sector_buf + (j + 1) * max_node_len, _MM_HINT_T0);
+          }
+          
+          float cur_expanded_dist = dist_cmp->compare(query, node_coords, (unsigned) aligned_dim);
+          full_retset.push_back(Neighbor(id, cur_expanded_dist, true));
+          vis_cand.emplace_back(cur_expanded_dist, node_buf);
         }
         if (vis_size && vis_size != p_size) {
           std::sort(vis_cand.begin(), vis_cand.end());
@@ -326,6 +364,55 @@ namespace diskann {
         }
       }
       last_io_ids.clear();
+#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
+      // 释放上次迭代的page pool引用
+      for (size_t i = 0; i < last_io_ids.size(); ++i) {
+        if (last_page_from_pool[i]) {
+          unsigned pid = id2page_[last_io_ids[i]];
+          page_pool_.leave_page(pid);
+        }
+      }
+#endif
+      last_io_ids.clear();
+#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
+      last_page_ptrs.clear();
+      last_page_from_pool.clear();
+#endif
+
+      // process page buffer cache hits: compute both target id and page neighbors
+      if (!page_cached_nhoods.empty()) {
+        for (auto &pc : page_cached_nhoods) {
+          const unsigned pid = pc.first;  // now directly stores page_id
+          char *sector_buf = pc.second;
+          
+          // 优化：直接处理页面内所有节点，减少开销
+          const unsigned page_size = gp_layout_[pid].size();
+          for (unsigned j = 0; j < page_size; ++j) {
+            const unsigned node_id = gp_layout_[pid][j];
+            char *node_buf = sector_buf + j * max_node_len;
+            
+            // 预取下一个节点
+            if (j + 1 < page_size) {
+              _mm_prefetch(sector_buf + (j + 1) * max_node_len, _MM_HINT_T0);
+            }
+            
+            // 直接计算距离，避免memcpy
+            const T* node_coords = (const T*)node_buf;
+            float cur_expanded_dist = dist_cmp->compare(query, node_coords, (unsigned) aligned_dim);
+            full_retset.push_back(Neighbor(node_id, cur_expanded_dist, true));
+            
+            // compute neighbors for this node
+            compute_and_push_nbrs(node_buf, nk);
+          }
+        }
+        // release page-pool refs acquired for this iteration
+
+        for (unsigned rpid : page_cache_release_pids) {
+          page_pool_.leave_page(rpid);
+        }
+        page_cached_nhoods.clear();
+        page_cache_release_pids.clear();
+      }
 
       // process cached nhoods
       for (auto &cached_nhood : cached_nhoods) {
@@ -342,19 +429,56 @@ namespace diskann {
         compute_and_push_nbrs(node_buf, nk);
       }
 
+      if (marker == k) {
+        break;
+      }
+
       // get last submitted io results, blocking
       if (!frontier.empty()) {
         reader->get_events(ctx, n_ops);
       }
 
-      // compute only the desired vectors in the pages - one for each page
-      // postpone remaining vectors to the next round
+      // 合并的循环：同时处理page pool缓存和last_pages优化
+#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
+      size_t copy_count = 0; // 跟踪copy到last_pages的次数
+#endif
       for (auto &frontier_nhood : frontier_nhoods) {
         char *sector_buf = frontier_nhood.second;
         unsigned pid = id2page_[frontier_nhood.first];
+        
+        // 1. 发布页面到page pool缓存
+        char* pool_canonical = nullptr;
+        if (!page_pool_.contains(pid)) {
+          char* pbuf = page_pool_.acquire();
+          if (pbuf != nullptr) {
+            memcpy(pbuf, sector_buf, SECTOR_LEN);
+            pool_canonical = page_pool_.add_page(pid, pbuf);
+            if (pool_canonical != pbuf) {
+              // repeat cache the same page, release it!
+              page_pool_.release(pbuf);
+            }
+          }
+        }
+#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
+        
+        // 2. 优化：尝试直接使用page pool中的指针，避免第二次copy
+        char* pool_ptr = page_pool_.enter_page(pid);
+        if (pool_ptr != nullptr) {
+          // 成功获取page pool指针，直接使用，不需要copy
+          last_page_ptrs.push_back(pool_ptr);
+          last_page_from_pool.push_back(true);
+        } else {
+          // page pool中没有或获取失败，回退到copy方式
+          memcpy(last_pages.data() + copy_count * SECTOR_LEN, sector_buf, SECTOR_LEN);
+          last_page_ptrs.push_back(last_pages.data() + copy_count * SECTOR_LEN);
+          last_page_from_pool.push_back(false);
+          copy_count++; // 增加copy计数
+        }
+#else
+        // 没有启用page pool优化，使用原来的copy方式
         memcpy(last_pages.data() + last_io_ids.size() * SECTOR_LEN, sector_buf, SECTOR_LEN);
+#endif
         last_io_ids.emplace_back(frontier_nhood.first);
-
         for (unsigned j = 0; j < gp_layout_[pid].size(); ++j) {
           unsigned id = gp_layout_[pid][j];
           if (id == frontier_nhood.first) {
@@ -368,8 +492,9 @@ namespace diskann {
       // update best inserted position
       if (nk <= k)
         k = nk;  // k is the best position in retset updated in this round.
-      else
-        ++k;
+      else {
+        while (++k < cur_list_size  && !retset[k].flag) {}
+      }
     }
 
     // re-sort by distance
@@ -400,9 +525,20 @@ namespace diskann {
     }
 
     if (t < k_search) {
-      diskann::cerr << "The number of unique ids is less than topk" << std::endl;
-      exit(1);
+      diskann::cerr << "The number of unique ids is less than topk, t = " << t << ", k_search = " << k_search << std::endl;
+      // exit(1);
     }
+
+    // 函数结束前释放最后的page pool引用
+#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
+    for (size_t i = 0; i < last_io_ids.size(); ++i) {
+      if (last_page_from_pool[i]) {
+        unsigned pid = id2page_[last_io_ids[i]];
+        page_pool_.leave_page(pid);
+      }
+    }
+#endif
+
 
     this->thread_data.push(data);
     this->thread_data.push_notify_all();

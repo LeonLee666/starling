@@ -90,6 +90,9 @@ namespace diskann {
   void PQFlashIndex<T>::setup_thread_data(_u64 nthreads) {
     diskann::cout << "Setting up thread-specific contexts for nthreads: "
                   << nthreads << std::endl;
+    // initialize shared page pool (4KB pages). Size heuristic: per-thread beam * 2
+    // Use a conservative default if not set yet.
+    page_pool_.init((uint64_t)(50000), (uint64_t) SECTOR_LEN);
 // omp parallel for to generate unique thread IDs
 #pragma omp parallel for num_threads((int) nthreads)
     for (_s64 thread = 0; thread < (_s64) nthreads; thread++) {
@@ -156,6 +159,7 @@ namespace diskann {
       if (this->use_page_search_) delete scratch.page_visited;
     }
     this->reader->deregister_all_threads();
+    page_pool_.destroy();
   }
 
   template<typename T>

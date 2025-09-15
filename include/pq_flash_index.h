@@ -19,6 +19,7 @@
 #include "windows_customizations.h"
 #include "index.h"
 #include "pq_flash_index_utils.h"
+#include "page_pool.h"
 
 #define MAX_GRAPH_DEGREE 512
 #define MAX_N_CMPS 16384
@@ -143,6 +144,9 @@ namespace diskann {
         const T *query, const _u64 k_search, const _u32 mem_L, const _u64 l_search, _u64 *res_ids,
         float *res_dists, const _u64 beam_width, const _u32 io_limit,
         const bool use_reorder_data = false, const float use_ratio = 1.0f, QueryStats *stats = nullptr);
+
+    // clear dynamic 4KB page buffer cache
+    DISKANN_DLLEXPORT void clear_page_cache() { page_pool_.clear_cache(); }
 
     DISKANN_DLLEXPORT _u32 range_search_iter_knn(const T *query1, const double range,
                                         const _u32          mem_L,
@@ -285,6 +289,9 @@ namespace diskann {
     // the length of the vector is equal to the total number of vectors in the base
     // idx = node_id, the key represents the neighbor id, value is its count
     std::vector<std::unordered_map<_u32, _u32>> nbrs_freq_counter_;
+
+    // Shared page pool across threads for 4KB sector buffers
+    PagePool page_pool_;
 
     void init_node_visit_counter();
 

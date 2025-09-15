@@ -3,9 +3,7 @@ project(SSD_Based_Plan)
 set(CMAKE_CXX_STANDARD 17)
 include_directories(include)
 
-#tbb
-set(TBB_TEST OFF CACHE BOOL "TBB Test" FORCE)
-add_subdirectory(oneTBB)
+# oneTBB is configured at repository root now
 
 
 # OpenMP
@@ -21,7 +19,7 @@ endif()
 find_package(Boost COMPONENTS program_options REQUIRED)
 
 add_executable(partitioner src/partitioner.cpp)
-target_link_libraries(partitioner PUBLIC tbb Boost::program_options diskann)
+target_link_libraries(partitioner PUBLIC Boost::program_options diskann tbb)
 
 # Enable AVX2 for this target on GCC/Clang to avoid ABI warnings and ensure
 # availability of 256-bit intrinsics used in headers.

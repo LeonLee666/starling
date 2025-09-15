@@ -12,7 +12,11 @@ else()
         natural_number_set.cpp memory_mapper.cpp partition_and_pq.cpp
         pq_flash_index.cpp logger.cpp utils.cpp page_search.cpp visit_freq.cpp
         range_search.cpp)
+    list(APPEND CPP_SOURCES page_pool.cpp)
     add_library(${PROJECT_NAME} ${CPP_SOURCES})
     add_library(${PROJECT_NAME}_s STATIC ${CPP_SOURCES})
+    # Simplified: always link exported oneTBB target
+    target_link_libraries(${PROJECT_NAME} PUBLIC tbb)
+    target_link_libraries(${PROJECT_NAME}_s PUBLIC tbb)
 endif()
 install()

@@ -1,6 +1,10 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT license.
 
+# Require modern CMake early and adopt policies
+cmake_minimum_required(VERSION 3.16)
+cmake_policy(SET CMP0028 NEW)
+
 # Parameters:
 #
 # BOOST_ROOT:
@@ -19,19 +23,15 @@ project(diskann)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_subdirectory(graph_partition)
+# Use C++17 globally
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(MSVC)
-	cmake_minimum_required(VERSION 3.15)
-else()
-	cmake_minimum_required(VERSION 2.8)
-endif()
 
-set(CMAKE_STANDARD 14)
+add_subdirectory(oneTBB)
+include_directories(${PROJECT_SOURCE_DIR}/oneTBB/include)
 
-if(NOT MSVC)
-	set(CMAKE_CXX_COMPILER g++)
-endif()
 
 # Install nuget packages for dependencies.
 if (MSVC)
@@ -235,11 +235,17 @@ else()
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DDEBUG -Wall -Wextra")
 	set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Ofast -DNDEBUG -march=native -mtune=native -ftree-vectorize")
 	add_compile_options(-march=native -Wall -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free -fopenmp -fopenmp-simd -funroll-loops -Wfatal-errors -DUSE_AVX2)
+
+    # Perf-friendly flags: 全局开启更好的调用栈/归因
+    # add_compile_options(-g -fno-omit-frame-pointer -fno-optimize-sibling-calls)
+    # add_link_options(-fno-omit-frame-pointer)
 endif()
 
 add_subdirectory(src)
 add_subdirectory(tests/utils)
 add_subdirectory(tests)
+
+add_subdirectory(graph_partition)
 
 if (MSVC)
     message(STATUS "The ${PROJECT_NAME}.sln has been created, opened it from VisualStudio to build Release or Debug configurations.\n"
