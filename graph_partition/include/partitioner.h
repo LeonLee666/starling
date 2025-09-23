@@ -42,6 +42,9 @@
 #ifndef INF
 #define INF 0xffffffff
 #endif  // INF
+
+#define TOP_PARTITIONS_COUNT 50000
+
 #ifndef READ_U64
 #define READ_U64(stream, val) stream.read((char *)&val, sizeof(_u64))
 #endif  // !READ_U64
@@ -781,6 +784,9 @@ class graph_partitioner {
     save_partition(filename);
     std::cout << "select pid nums" << select_nums << " get unfilled partition nums: " << getUnfilled_nums << std::endl;
     std::cout << "total ivf time: " << ivf_time << std::endl;
+    
+    // 计算并保存partition度中心性统计（替代简单的入度统计）
+    calculate_and_save_partition_centrality(filename);
   }
   void graph_partition_LDG() {
     free_q.clear();
@@ -1041,6 +1047,99 @@ class graph_partitioner {
   }
 
 private:
+  /**
+   * 计算并输出每个partition的度中心性统计 
+   * 综合考虑入度和出度，以及与medoids的距离
+   * @param filename 输出文件的基础名称
+   */
+  void calculate_and_save_partition_centrality(const char* filename) {
+    std::cout << "开始计算partition度中心性统计..." << std::endl;
+    
+    // 计算每个partition的入度、出度和度中心性
+    std::vector<unsigned> partition_indegree(_partition_number, 0);
+    std::vector<unsigned> partition_outdegree(_partition_number, 0);
+    std::vector<float> partition_centrality(_partition_number, 0.0f);
+    
+#pragma omp parallel for
+    for (unsigned pid = 0; pid < _partition_number; pid++) {
+      // 遍历当前partition中的每个节点
+      for (unsigned node : _partition[pid]) {
+        // 计算入度：指向该节点的跨partition边
+        for (unsigned neighbor : reverse_graph[node]) {
+          unsigned neighbor_pid = id2pid[neighbor];
+          if (neighbor_pid != pid && neighbor_pid != INF) {
+#pragma omp atomic
+            partition_indegree[pid]++;
+          }
+        }
+        
+        // 计算出度：该节点指向其他partition的边
+        for (unsigned neighbor : direct_graph[node]) {
+          unsigned neighbor_pid = id2pid[neighbor];
+          if (neighbor_pid != pid && neighbor_pid != INF) {
+#pragma omp atomic
+            partition_outdegree[pid]++;
+          }
+        }
+      }
+    }
+    
+    // 计算度中心性分数（综合指标）
+    std::cout << "计算度中心性分数..." << std::endl;
+    for (unsigned pid = 0; pid < _partition_number; pid++) {
+      if (_partition[pid].empty()) continue;
+      // 加权：入度权重更高（搜索更容易到达）
+      float weighted_score = partition_indegree[pid] * 2.0f + partition_outdegree[pid] * 1.0f;
+      // 考虑partition大小的影响（大的partition可能更重要）
+      float size_bonus = std::log(1.0f + _partition[pid].size());
+      partition_centrality[pid] = weighted_score * size_bonus;
+    }
+    
+    // 创建<中心性分数, partition_id>对用于排序
+    std::vector<std::pair<float, unsigned>> centrality_pairs;
+    for (unsigned i = 0; i < _partition_number; i++) {
+      centrality_pairs.push_back({partition_centrality[i], i});
+    }
+    
+    // 按中心性分数降序排序
+    std::sort(centrality_pairs.begin(), centrality_pairs.end(), 
+              [](const std::pair<float, unsigned>& a, const std::pair<float, unsigned>& b) {
+                return a.first > b.first;  // 降序排序
+              });
+    
+    // 输出统计信息
+    std::cout << "Partition度中心性统计（前" << std::min((int)TOP_PARTITIONS_COUNT, (int)_partition_number) << "个）:" << std::endl;
+    for (int i = 0; i < std::min(10, (int)_partition_number); i++) { // 只显示前10个
+      unsigned pid = centrality_pairs[i].second;
+      std::cout << "Partition " << pid 
+                << ": 中心性=" << centrality_pairs[i].first
+                << " (入度=" << partition_indegree[pid] 
+                << ", 出度=" << partition_outdegree[pid] 
+                << ", 大小=" << _partition[pid].size() << ")" << std::endl;
+    }
+    
+    // 保存到文件
+    std::string output_filename = std::string(filename) + "_top_centrality_partitions.txt";
+    std::ofstream output_file(output_filename);
+    if (output_file.is_open()) {
+      output_file << "# Top " << TOP_PARTITIONS_COUNT << " partitions with highest centrality\n";
+      output_file << "# Format: partition_id centrality_score indegree outdegree size\n";
+      for (int i = 0; i < std::min((int)TOP_PARTITIONS_COUNT, (int)_partition_number); i++) {
+        unsigned pid = centrality_pairs[i].second;
+        output_file << pid << " " << centrality_pairs[i].first 
+                   << " " << partition_indegree[pid] << " " << partition_outdegree[pid] 
+                   << " " << _partition[pid].size() << std::endl;
+      }
+      output_file.close();
+      std::cout << "度中心性最高的partition ID已保存到文件: " << output_filename << std::endl;
+    } else {
+      std::cout << "无法创建输出文件: " << output_filename << std::endl;
+    }
+  }
+
+
+
+ private:
   size_t _dim;  // vector dimension
   _u64 _nd;     // vector number
   _u64 _max_node_len;

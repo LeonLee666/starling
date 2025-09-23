@@ -1,12 +1,17 @@
 #include <immintrin.h>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <algorithm>
 #include "logger.h"
 #include "percentile_stats.h"
 #include "pq_flash_index.h"
 #include "timer.h"
 
 #define DYN_BEAM_WIDTH
+#define PAGE_BUF_SIZE 50000
 #define ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
 
 namespace diskann {
@@ -36,6 +41,141 @@ namespace diskann {
     this->id2page_.resize(nd);
     part.read((char *) id2page_.data(), sizeof(unsigned) * nd);
     diskann::cout << "Load partition data done." << std::endl;
+  }
+
+  template<typename T>
+  void PQFlashIndex<T>::load_and_cache_high_priority_partitions(const std::string &index_prefix) {
+    // 尝试多种缓存策略，按优先级顺序
+    std::vector<std::pair<std::string, std::string>> strategies = {
+        {"_top_pagerank_pages.txt", "PageRank"},           // 1st choice: Page级PageRank
+        {"_top_centrality_partitions.txt", "度中心性"},     // 2nd choice: 度中心性
+    };
+    
+    std::ifstream priority_stream;
+    std::string strategy_name = "";
+    std::string priority_file = "";
+    
+    // 尝试找到可用的策略文件
+    for (const auto& strategy : strategies) {
+      priority_file = index_prefix + strategy.first;
+      priority_stream.open(priority_file);
+      if (priority_stream.is_open()) {
+        strategy_name = strategy.second;
+        break;
+      }
+    }
+    
+    if (!priority_stream.is_open()) {
+      diskann::cout << "Warning: 未找到任何partition优先级文件，跳过预缓存。" << std::endl;
+      return;
+    }
+    
+    diskann::cout << "使用缓存策略：" << strategy_name << "，文件：" << priority_file << std::endl;
+    
+    std::string line;
+    partition_priority_.clear();
+    high_priority_partitions_.clear();
+    
+    // 跳过注释行并解析数据
+    while (std::getline(priority_stream, line)) {
+      if (line.empty() || line[0] == '#') continue;
+      
+      std::istringstream iss(line);
+      unsigned partition_id;
+      float priority_score;
+      if (iss >> partition_id >> priority_score) {
+        partition_priority_.emplace_back(partition_id, priority_score);
+        high_priority_partitions_.push_back(partition_id);
+      }
+    }
+    priority_stream.close();
+    
+    if (partition_priority_.empty()) {
+      diskann::cout << "Warning: 没有读取到有效的partition优先级信息。" << std::endl;
+      return;
+    }
+    
+    diskann::cout << "Loaded " << partition_priority_.size() << " partition priority entries using " << strategy_name << " strategy." << std::endl;
+    
+    // 限制要缓存的partition数量
+    unsigned num_to_cache = high_priority_partitions_.size();
+    
+    diskann::cout << "Pre-caching " << num_to_cache << " high priority partitions..." << std::endl;
+    
+    // 提前初始化PagePool用于预缓存
+    diskann::cout << "Initializing PagePool for pre-caching..." << std::endl;
+    page_pool_.init((uint64_t)(PAGE_BUF_SIZE), (uint64_t) SECTOR_LEN);
+    
+    // 预缓存高优先级partition对应的页面  
+    unsigned cached_pages = 0;
+    for (unsigned i = 0; i < num_to_cache; i++) {
+      unsigned partition_id = high_priority_partitions_[i];
+      
+      // 检查partition_id是否有效
+      if (partition_id >= gp_layout_.size()) {
+        diskann::cout << "Warning: Invalid partition_id " << partition_id 
+                     << " (max: " << gp_layout_.size() - 1 << ")" << std::endl;
+        continue;
+      }
+      
+      // 跳过空分区
+      if (gp_layout_[partition_id].empty()) {
+        continue;
+      }
+      
+      // partition_id 就是 page_id！
+      unsigned page_id = partition_id;
+      
+      // 该页面已经在page pool中了，跳过
+      if (page_pool_.contains(page_id)) {
+        continue;
+      }
+      
+      // 尝试预读并缓存这个partition对应的页面
+      try {
+        char* buf = page_pool_.acquire();
+        if (buf == nullptr) {
+          diskann::cout << "Warning: 无法获取缓存空间，停止预缓存。已缓存页面数: " << cached_pages << std::endl;
+          break;
+        }
+        
+        // 借用已经初始化的线程上下文
+        ThreadData<T> data = this->thread_data.pop();
+        while (data.scratch.sector_scratch == nullptr) {
+          this->thread_data.wait_for_push_notify();
+          data = this->thread_data.pop();
+        }
+        IOContext &ctx = data.ctx;
+        
+        // 读取页面内容（使用AlignedFileReader）
+        std::vector<AlignedRead> read_reqs;
+        AlignedRead read_req;
+        read_req.buf = buf;
+        read_req.len = SECTOR_LEN;
+        read_req.offset = SECTOR_LEN * (1 + page_id); // +1 跳过header sector，使用正确的page_id
+        read_reqs.push_back(read_req);
+        
+        reader->read(read_reqs, ctx, false); // 同步读取（blocking call）
+        
+        // 归还线程上下文
+        this->thread_data.push(data);
+        this->thread_data.push_notify_all();
+        
+        // 将页面添加到page pool（使用正确的page_id）
+        char* canonical_buf = page_pool_.add_page(page_id, buf);
+        if (canonical_buf != buf) {
+          // 页面已经存在（并发情况），释放我们申请的缓冲区
+          page_pool_.release(buf);
+        }
+        cached_pages++;        
+      } catch (const std::exception& e) {
+        diskann::cout << "Warning: 预缓存partition " << partition_id 
+                     << " 失败: " << e.what() << std::endl;
+        continue;
+      }
+    }
+    diskann::cout << "Successfully pre-cached " << cached_pages
+                   << " high priority partition pages using " << strategy_name << " strategy." << std::endl;
   }
 
   template<typename T>
@@ -224,12 +364,6 @@ namespace diskann {
     std::vector<unsigned> last_io_ids;
     last_io_ids.reserve(2 * beam_width);
     std::vector<char> last_pages(SECTOR_LEN * beam_width * 2);
-#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
-    std::vector<char*> last_page_ptrs; 
-    std::vector<bool> last_page_from_pool; 
-    last_page_ptrs.reserve(2 * beam_width);
-    last_page_from_pool.reserve(2 * beam_width);
-#endif
     int n_ops = 0;
 
     while (k < cur_list_size && num_ios < io_limit) {
@@ -259,7 +393,6 @@ namespace diskann {
         const unsigned pid = id2page_[retset[marker].id];
         if (retset[marker].flag && page_visited.find(pid) == page_visited.end()) {
           num_seen++;
-
           char* cached_page_buf = page_pool_.enter_page(pid);
           if (cached_page_buf != nullptr) {
             page_cached_nhoods.emplace_back(pid, cached_page_buf);
@@ -271,7 +404,7 @@ namespace diskann {
             }
             marker++;
             continue;
-          }
+          } 
 
           auto iter = nhood_cache.find(retset[marker].id);
           if (iter != nhood_cache.end()) {
@@ -325,11 +458,7 @@ namespace diskann {
       // compute remaining nodes in the pages that are fetched in the previous round
       for (size_t i = 0; i < last_io_ids.size(); ++i) {
         const unsigned last_io_id = last_io_ids[i];
-#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
-        char    *sector_buf = last_page_ptrs[i]; // 使用指针数组代替copy的数据
-#else
-        char    *sector_buf = last_pages.data() + i * SECTOR_LEN; // 传统方式：直接使用固定缓冲区
-#endif
+        char    *sector_buf = last_pages.data() + i * SECTOR_LEN;
         const unsigned pid = id2page_[last_io_id];
         const unsigned p_size = gp_layout_[pid].size();
         // minus one for the vector that is computed previously
@@ -364,20 +493,6 @@ namespace diskann {
         }
       }
       last_io_ids.clear();
-#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
-      // 释放上次迭代的page pool引用
-      for (size_t i = 0; i < last_io_ids.size(); ++i) {
-        if (last_page_from_pool[i]) {
-          unsigned pid = id2page_[last_io_ids[i]];
-          page_pool_.leave_page(pid);
-        }
-      }
-#endif
-      last_io_ids.clear();
-#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
-      last_page_ptrs.clear();
-      last_page_from_pool.clear();
-#endif
 
       // process page buffer cache hits: compute both target id and page neighbors
       if (!page_cached_nhoods.empty()) {
@@ -438,46 +553,13 @@ namespace diskann {
         reader->get_events(ctx, n_ops);
       }
 
-      // 合并的循环：同时处理page pool缓存和last_pages优化
-#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
-      size_t copy_count = 0; // 跟踪copy到last_pages的次数
-#endif
+      // 处理前沿节点
       for (auto &frontier_nhood : frontier_nhoods) {
         char *sector_buf = frontier_nhood.second;
         unsigned pid = id2page_[frontier_nhood.first];
         
-        // 1. 发布页面到page pool缓存
-        char* pool_canonical = nullptr;
-        if (!page_pool_.contains(pid)) {
-          char* pbuf = page_pool_.acquire();
-          if (pbuf != nullptr) {
-            memcpy(pbuf, sector_buf, SECTOR_LEN);
-            pool_canonical = page_pool_.add_page(pid, pbuf);
-            if (pool_canonical != pbuf) {
-              // repeat cache the same page, release it!
-              page_pool_.release(pbuf);
-            }
-          }
-        }
-#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
-        
-        // 2. 优化：尝试直接使用page pool中的指针，避免第二次copy
-        char* pool_ptr = page_pool_.enter_page(pid);
-        if (pool_ptr != nullptr) {
-          // 成功获取page pool指针，直接使用，不需要copy
-          last_page_ptrs.push_back(pool_ptr);
-          last_page_from_pool.push_back(true);
-        } else {
-          // page pool中没有或获取失败，回退到copy方式
-          memcpy(last_pages.data() + copy_count * SECTOR_LEN, sector_buf, SECTOR_LEN);
-          last_page_ptrs.push_back(last_pages.data() + copy_count * SECTOR_LEN);
-          last_page_from_pool.push_back(false);
-          copy_count++; // 增加copy计数
-        }
-#else
-        // 没有启用page pool优化，使用原来的copy方式
+        // 直接copy到last_pages缓冲区
         memcpy(last_pages.data() + last_io_ids.size() * SECTOR_LEN, sector_buf, SECTOR_LEN);
-#endif
         last_io_ids.emplace_back(frontier_nhood.first);
         for (unsigned j = 0; j < gp_layout_[pid].size(); ++j) {
           unsigned id = gp_layout_[pid][j];
@@ -529,15 +611,6 @@ namespace diskann {
       // exit(1);
     }
 
-    // 函数结束前释放最后的page pool引用
-#ifdef ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
-    for (size_t i = 0; i < last_io_ids.size(); ++i) {
-      if (last_page_from_pool[i]) {
-        unsigned pid = id2page_[last_io_ids[i]];
-        page_pool_.leave_page(pid);
-      }
-    }
-#endif
 
 
     this->thread_data.push(data);

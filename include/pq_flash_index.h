@@ -87,6 +87,9 @@ namespace diskann {
     // load id to page id and graph partition layout
     DISKANN_DLLEXPORT void load_partition_data(const std::string &index_prefix,
         const _u64 nnodes_per_sector = 0, const _u64 num_points = 0);
+    
+    // load partition priority information and pre-cache high priority pages
+    DISKANN_DLLEXPORT void load_and_cache_high_priority_partitions(const std::string &index_prefix);
 
 #ifdef EXEC_ENV_OLS
     DISKANN_DLLEXPORT int load(diskann::MemoryMappedFiles &files,
@@ -278,6 +281,10 @@ namespace diskann {
     bool use_page_search_ = true;
     std::vector<unsigned> id2page_;
     std::vector<std::vector<unsigned>> gp_layout_;
+    
+    // partition priority caching (supports multiple strategies)
+    std::vector<std::pair<unsigned, float>> partition_priority_; // pair<partition_id, priority_score>
+    std::vector<unsigned> high_priority_partitions_; // sorted by priority (descending)
 
     bool use_sq_ = false;
     float* mins = nullptr;

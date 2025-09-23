@@ -240,7 +240,7 @@ int search_disk_index(
     // Using branching outside the for loop instead of inside and 
     // std::function/std::mem_fn for less switching and function calling overhead
     if (use_page_search) {
-      _pFlashIndex->clear_page_cache();
+      // _pFlashIndex->clear_page_cache(); // 注释掉：避免清除预缓存的高入度页面
       if(use_sq){
   #pragma omp parallel for schedule(dynamic, 1)
         for (_s64 i = 0; i < (int64_t) query_num; i++) {
