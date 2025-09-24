@@ -155,7 +155,8 @@ case $2 in
     #TODO: Use only one index file
     cp ${GP_PATH}_part_tmp.index ${INDEX_PREFIX_PATH}_disk.index
     cp ${GP_FILE_PATH} ${INDEX_PREFIX_PATH}_partition.bin
-    cp ${GP_FILE_PATH}_top_centrality_partitions.txt ${INDEX_PREFIX_PATH}_top_centrality_partitions.txt
+    # cp ${GP_FILE_PATH}_top_centrality_partitions.txt ${INDEX_PREFIX_PATH}_top_centrality_partitions.txt
+    cp ${GP_FILE_PATH}_top_pagerank_pages.txt ${INDEX_PREFIX_PATH}_top_pagerank_pages.txt
   ;;
   search)
     mkdir -p ${INDEX_PREFIX_PATH}/search

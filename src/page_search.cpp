@@ -104,7 +104,7 @@ namespace diskann {
     
     // 提前初始化PagePool用于预缓存
     diskann::cout << "Initializing PagePool for pre-caching..." << std::endl;
-    page_pool_.init((uint64_t)(PAGE_BUF_SIZE), (uint64_t) SECTOR_LEN);
+    page_pool_.init((uint64_t)(num_to_cache), (uint64_t) SECTOR_LEN);
     
     // 预缓存高优先级partition对应的页面  
     unsigned cached_pages = 0;

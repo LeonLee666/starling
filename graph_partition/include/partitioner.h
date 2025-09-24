@@ -787,6 +787,9 @@ class graph_partitioner {
     
     // 计算并保存partition度中心性统计（替代简单的入度统计）
     calculate_and_save_partition_centrality(filename);
+    
+    // 计算并保存基于PageRank的page重要性排序
+    calculate_and_save_page_pagerank(filename);
   }
   void graph_partition_LDG() {
     free_q.clear();
@@ -1046,7 +1049,177 @@ class graph_partitioner {
     for (auto x : B) id2pid[x] = pid_b;
   }
 
-private:
+  /**
+   * 基于Page级别图计算PageRank值来选择要缓存的pages
+   * 理论：PageRank能识别在图中具有全局重要性的页面
+   */
+  void calculate_and_save_page_pagerank(const char* filename) {
+    std::cout << "开始构建Page级别图并计算PageRank..." << std::endl;
+    
+    // Step 1: 构建Page级别的加权图
+    struct PageEdge {
+      unsigned target_page;
+      float weight;
+      PageEdge(unsigned target, float w) : target_page(target), weight(w) {}
+    };
+    
+    std::vector<std::vector<PageEdge>> page_graph(_partition_number);
+    std::vector<std::unordered_map<unsigned, float>> page_edge_weights(_partition_number);
+    
+    std::cout << "构建Page图: 统计Page间的连接权重..." << std::endl;
+    
+    // 遍历所有节点，构建page间的连接 - OpenMP并行化
+    #pragma omp parallel
+    {
+      // 每个线程维护自己的局部权重映射
+      std::vector<std::unordered_map<unsigned, float>> local_page_edge_weights(_partition_number);
+      
+      #pragma omp for schedule(dynamic, 1000)
+      for (unsigned node_id = 0; node_id < _nd; node_id++) {
+        auto it_a = id2pid.find(node_id);
+        if (it_a == id2pid.end()) continue;
+        unsigned page_a = it_a->second;  // 当前节点所在的page/partition
+        if (page_a >= _partition_number || page_a == INF) continue;
+        
+        // 遍历该节点的所有邻居
+        for (unsigned neighbor : full_graph[node_id]) {
+          auto it_b = id2pid.find(neighbor);
+          if (it_b == id2pid.end()) continue;
+          unsigned page_b = it_b->second;  // 邻居节点所在的page/partition
+          if (page_b >= _partition_number || page_b == INF) continue;
+          
+          if (page_a != page_b) {  // 跨page的边
+            local_page_edge_weights[page_a][page_b] += 1.0f;  // 累加权重到局部映射
+          }
+        }
+      }
+      
+      // 合并所有线程的局部权重映射到全局映射
+      #pragma omp critical
+      {
+        for (unsigned page_a = 0; page_a < _partition_number; page_a++) {
+          for (const auto& edge : local_page_edge_weights[page_a]) {
+            page_edge_weights[page_a][edge.first] += edge.second;
+          }
+        }
+      }
+    }
+    
+    // 将权重map转换为邻接表 - OpenMP并行化
+    std::vector<float> page_outdegree(_partition_number, 0.0f);
+    #pragma omp parallel for schedule(static)
+    for (unsigned page_a = 0; page_a < _partition_number; page_a++) {
+      for (const auto& edge : page_edge_weights[page_a]) {
+        unsigned page_b = edge.first;
+        float weight = edge.second;
+        page_graph[page_a].emplace_back(page_b, weight);
+        page_outdegree[page_a] += weight;
+      }
+    }
+    
+    std::cout << "Page图构建完成. 共有 " << _partition_number << " 个pages" << std::endl;
+    
+    // Step 2: 计算PageRank
+    std::vector<float> pagerank(_partition_number, 1.0f / _partition_number);
+    std::vector<float> new_pagerank(_partition_number);
+    const float damping_factor = 0.85f;
+    const float tolerance = 1e-6f;
+    const int max_iterations = 100;
+    
+    std::cout << "开始PageRank迭代计算..." << std::endl;
+    
+    for (int iter = 0; iter < max_iterations; iter++) {
+      // 初始化新的PageRank值 - OpenMP并行化
+      #pragma omp parallel for schedule(static)
+      for (unsigned i = 0; i < _partition_number; i++) {
+        new_pagerank[i] = (1.0f - damping_factor) / _partition_number;
+      }
+      
+      // PageRank传播 - OpenMP并行化
+      #pragma omp parallel for schedule(static)
+      for (unsigned page_a = 0; page_a < _partition_number; page_a++) {
+        if (page_outdegree[page_a] > 0) {
+          float contribution = damping_factor * pagerank[page_a] / page_outdegree[page_a];
+          for (const auto& edge : page_graph[page_a]) {
+            #pragma omp atomic
+            new_pagerank[edge.target_page] += contribution * edge.weight;
+          }
+        } else {
+          // 处理悬挂页面：将权重平均分配给所有页面
+          float dangling_contribution = damping_factor * pagerank[page_a] / _partition_number;
+          for (unsigned i = 0; i < _partition_number; i++) {
+            #pragma omp atomic
+            new_pagerank[i] += dangling_contribution;
+          }
+        }
+      }
+      
+      // 检查收敛 - OpenMP并行化使用reduction
+      float diff = 0.0f;
+      #pragma omp parallel for reduction(+:diff)
+      for (unsigned i = 0; i < _partition_number; i++) {
+        diff += std::abs(new_pagerank[i] - pagerank[i]);
+      }
+      
+      // 更新pagerank向量 - OpenMP并行化
+      #pragma omp parallel for schedule(static)
+      for (unsigned i = 0; i < _partition_number; i++) {
+        pagerank[i] = new_pagerank[i];
+      }
+      
+      if (iter % 10 == 0) {
+        std::cout << "PageRank迭代 " << iter << ", 差值: " << diff << std::endl;
+      }
+      
+      if (diff < tolerance) {
+        std::cout << "PageRank收敛于第 " << iter + 1 << " 次迭代" << std::endl;
+        break;
+      }
+    }
+    
+    // Step 3: 按PageRank值排序
+    std::vector<std::pair<float, unsigned>> pagerank_pairs(_partition_number);
+    // 并行构建PageRank排序对 - OpenMP并行化
+    #pragma omp parallel for schedule(static)
+    for (unsigned i = 0; i < _partition_number; i++) {
+      pagerank_pairs[i] = {pagerank[i], i};
+    }
+    
+    // 按PageRank值降序排序
+    std::sort(pagerank_pairs.begin(), pagerank_pairs.end(), 
+              [](const std::pair<float, unsigned>& a, const std::pair<float, unsigned>& b) {
+                return a.first > b.first;  // 降序排序
+              });
+    
+    // 输出统计信息
+    std::cout << "Page PageRank统计（前10个）:" << std::endl;
+    for (int i = 0; i < std::min(10, (int)_partition_number); i++) {
+      unsigned page_id = pagerank_pairs[i].second;
+      std::cout << "Page " << page_id 
+                << ": PageRank=" << pagerank_pairs[i].first
+                << " (出度=" << page_outdegree[page_id] 
+                << ", 大小=" << _partition[page_id].size() << ")" << std::endl;
+    }
+    
+    // Step 4: 保存到文件
+    std::string output_filename = std::string(filename) + "_top_pagerank_pages.txt";
+    std::ofstream output_file(output_filename);
+    if (output_file.is_open()) {
+      output_file << "# Top " << TOP_PARTITIONS_COUNT << " pages ranked by PageRank score\n";
+      output_file << "# Format: page_id pagerank_score out_degree page_size\n";
+      for (int i = 0; i < std::min((int)TOP_PARTITIONS_COUNT, (int)_partition_number); i++) {
+        unsigned page_id = pagerank_pairs[i].second;
+        output_file << page_id << " " << pagerank_pairs[i].first 
+                   << " " << page_outdegree[page_id] << " " << _partition[page_id].size() << std::endl;
+      }
+      output_file.close();
+      std::cout << "PageRank最高的page ID已保存到文件: " << output_filename << std::endl;
+    } else {
+      std::cout << "无法创建输出文件: " << output_filename << std::endl;
+    }
+  }
+
+ private:
   /**
    * 计算并输出每个partition的度中心性统计 
    * 综合考虑入度和出度，以及与medoids的距离
@@ -1108,8 +1281,8 @@ private:
               });
     
     // 输出统计信息
-    std::cout << "Partition度中心性统计（前" << std::min((int)TOP_PARTITIONS_COUNT, (int)_partition_number) << "个）:" << std::endl;
-    for (int i = 0; i < std::min(10, (int)_partition_number); i++) { // 只显示前10个
+    int stat_size = (int)(_partition_number/5);
+    for (int i = 0; i < std::min(10, stat_size); i++) { // 只显示前10个
       unsigned pid = centrality_pairs[i].second;
       std::cout << "Partition " << pid 
                 << ": 中心性=" << centrality_pairs[i].first
@@ -1122,9 +1295,9 @@ private:
     std::string output_filename = std::string(filename) + "_top_centrality_partitions.txt";
     std::ofstream output_file(output_filename);
     if (output_file.is_open()) {
-      output_file << "# Top " << TOP_PARTITIONS_COUNT << " partitions with highest centrality\n";
+      output_file << "# Top " << stat_size << " partitions with highest centrality\n";
       output_file << "# Format: partition_id centrality_score indegree outdegree size\n";
-      for (int i = 0; i < std::min((int)TOP_PARTITIONS_COUNT, (int)_partition_number); i++) {
+      for (int i = 0; i < stat_size; i++) {
         unsigned pid = centrality_pairs[i].second;
         output_file << pid << " " << centrality_pairs[i].first 
                    << " " << partition_indegree[pid] << " " << partition_outdegree[pid] 
