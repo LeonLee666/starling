@@ -23,7 +23,7 @@ USE_SQ=0
 MEM_R=48
 MEM_BUILD_L=128
 MEM_ALPHA=1.2
-MEM_RAND_SAMPLING_RATE=0.01
+MEM_RAND_SAMPLING_RATE=0.0001
 MEM_USE_FREQ=0
 MEM_FREQ_USE_RATE=0.01
 
@@ -42,7 +42,7 @@ FREQ_MEM_TOPK=10
 #######################
 #   Graph Partition   #
 #######################
-GP_TIMES=16
+GP_TIMES=12
 GP_T=48
 GP_LOCK_NUMS=0 # will lock nodes at init, the lock_node_nums = partition_size * GP_LOCK_NUMS
 GP_USE_FREQ=0 # use freq file to partition graph
