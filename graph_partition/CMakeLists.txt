@@ -3,8 +3,6 @@ project(SSD_Based_Plan)
 set(CMAKE_CXX_STANDARD 17)
 include_directories(include)
 
-# oneTBB is configured at repository root now
-
 
 # OpenMP
 find_package(OpenMP REQUIRED)
@@ -16,10 +14,17 @@ else()
 endif()
 
 #boost
+
 find_package(Boost COMPONENTS program_options REQUIRED)
+find_package(folly REQUIRED)
+
+# Force linking of all libraries to resolve folly symbols
+if(NOT MSVC)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-as-needed")
+endif()
 
 add_executable(partitioner src/partitioner.cpp)
-target_link_libraries(partitioner PUBLIC Boost::program_options diskann tbb)
+target_link_libraries(partitioner PUBLIC Boost::program_options diskann onetbb::onetbb folly::folly)
 
 # Enable AVX2 for this target on GCC/Clang to avoid ABI warnings and ensure
 # availability of 256-bit intrinsics used in headers.

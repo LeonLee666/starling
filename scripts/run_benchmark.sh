@@ -29,27 +29,38 @@ check_dir_and_make_if_absent() {
   fi
 }
 
-case $1 in
+if [ $# -eq 1 ]; then
+  case $1 in
   debug)
-    cmake -DCMAKE_BUILD_TYPE=Debug .. -B ../debug
-    EXE_PATH=../debug
+    cd ..
+    if [ ! -f "CMakeUserPresets.json" ]; then
+      rm -rf build
+      conan install . --build=missing
+    fi
+    cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Debug -G "Unix Makefiles" -DCMAKE_TOOLCHAIN_FILE=Release/generators/conan_toolchain.cmake  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW
+    make -j
+    cd ../scripts
   ;;
   release)
-    cmake -DCMAKE_BUILD_TYPE=Release .. -B ../release
-    EXE_PATH=../release
+    cd ..
+    if [ ! -f "CMakeUserPresets.json" ]; then
+      rm -rf build
+      conan install . --build=missing
+    fi
+    cd build
+    cmake .. -DCMAKE_BUILD_TYPE=Release -G "Unix Makefiles" -DCMAKE_TOOLCHAIN_FILE=Release/generators/conan_toolchain.cmake  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW
+    make -j 
+    cd ../scripts
   ;;
   *)
     print_usage_and_exit
   ;;
 esac
-if [ $# -eq 1 ]; then
-pushd $EXE_PATH
-make -j
-popd
 fi
 
 mkdir -p ../indices && cd ../indices
-
+EXE_PATH=../build
 date
 case $2 in
   build)
@@ -155,8 +166,7 @@ case $2 in
     #TODO: Use only one index file
     cp ${GP_PATH}_part_tmp.index ${INDEX_PREFIX_PATH}_disk.index
     cp ${GP_FILE_PATH} ${INDEX_PREFIX_PATH}_partition.bin
-    # cp ${GP_FILE_PATH}_top_centrality_partitions.txt ${INDEX_PREFIX_PATH}_top_centrality_partitions.txt
-    cp ${GP_FILE_PATH}_top_pagerank_pages.txt ${INDEX_PREFIX_PATH}_top_pagerank_pages.txt
+    cp ${GP_FILE_PATH}_top_centrality_partitions.txt ${INDEX_PREFIX_PATH}_top_centrality_partitions.txt
   ;;
   search)
     mkdir -p ${INDEX_PREFIX_PATH}/search

@@ -27,11 +27,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+add_definitions(-DFOLLY_SSE=4)
 
-
-add_subdirectory(oneTBB)
-include_directories(${PROJECT_SOURCE_DIR}/oneTBB/include)
-
+find_package(folly REQUIRED)
+find_package(TBB REQUIRED)
 
 # Install nuget packages for dependencies.
 if (MSVC)
@@ -94,6 +93,7 @@ endif()
 
 find_package(Boost COMPONENTS program_options)
 
+
 # For Windows, fall back to nuget version if find_package didn't find it.
 if (MSVC AND NOT Boost_FOUND)
     set(DISKANN_BOOST_INCLUDE "${DISKANN_MSVC_PACKAGES}/boost/lib/native/include")
@@ -145,8 +145,9 @@ else()
 	include_directories(/usr/include/mkl)
 
 	# compile flags and link libraries
-        add_compile_options(-m64 -Wl,--no-as-needed) 
-	link_libraries(mkl_intel_ilp64 mkl_intel_thread mkl_core iomp5 pthread m dl)
+        add_compile_options(-m64)
+        add_link_options(-Wl,--no-as-needed)
+	link_libraries(mkl_intel_ilp64 mkl_intel_thread mkl_core iomp5 pthread m dl aio)
 endif()
 
 add_definitions(-DMKL_ILP64)
@@ -234,11 +235,13 @@ else()
     #	set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DDEBUG -O0 -fsanitize=address -fsanitize=leak -fsanitize=undefined")
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DDEBUG -Wall -Wextra")
 	set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Ofast -DNDEBUG -march=native -mtune=native -ftree-vectorize")
-	add_compile_options(-march=native -Wall -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free -fopenmp -fopenmp-simd -funroll-loops -Wfatal-errors -DUSE_AVX2)
+	
+	# Enable SSE4.2 explicitly for Folly F14 hash table compatibility
+	add_compile_options(-march=native -msse4.2 -Wall -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free -fopenmp -fopenmp-simd -funroll-loops -Wfatal-errors -DUSE_AVX2)
 
-    # Perf-friendly flags: 全局开启更好的调用栈/归因
-    # add_compile_options(-g -fno-omit-frame-pointer -fno-optimize-sibling-calls)
-    # add_link_options(-fno-omit-frame-pointer)
+    # Perf-friendly flags: Global enable better call stack/attribution
+    add_compile_options(-fno-omit-frame-pointer -fno-optimize-sibling-calls)
+    add_link_options(-fno-omit-frame-pointer)
 endif()
 
 add_subdirectory(src)

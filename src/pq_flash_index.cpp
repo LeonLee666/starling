@@ -3,6 +3,7 @@
 
 #include "logger.h"
 #include "pq_flash_index.h"
+#include "io_merge_wrapper.h"
 #include <malloc.h>
 #include "percentile_stats.h"
 
@@ -58,6 +59,8 @@ namespace diskann {
     this->dist_cmp_float.reset(diskann::get_distance_function<float>(m));
     this->use_page_search_ = use_page_search;
     this->use_sq_ = use_sq;
+    
+    // 延迟初始化IO合并器，等到真正需要时再初始化
   }
 
   template<typename T>
@@ -70,6 +73,7 @@ namespace diskann {
 
     if (centroid_data != nullptr)
       aligned_free(centroid_data);
+    
     // delete backing bufs for nhood and coord cache
     if (nhood_cache_buf != nullptr) {
       delete[] nhood_cache_buf;

@@ -1,0 +1,55 @@
+# Starling 项目的 Cursor 规则
+
+## 代码注释规范
+- 所有代码注释必须使用英文
+- 函数头注释用英文描述功能、参数和返回值
+- 行内注释用英文解释复杂逻辑
+- TODO注释用英文描述待办事项
+
+## 错误处理和继续任务
+- 当用户说"继续"或"go on"时，通常表示cursor遇到了错误或中断
+- 此时应该：
+  1. 检查最后一个未完成的操作
+  2. 继续执行中断的任务
+  3. 不要重新开始或询问用户意图
+  4. 直接解决问题并继续
+
+
+## 代码审查重点
+- 检查内存泄漏和野指针
+- 验证多线程安全性
+- 确保异常安全性
+- 性能关键路径的优化
+
+## 示例注释风格
+```cpp
+// 🔧 Fix segfault: avoid traversing hash map in concurrent environment
+void cleanup_cache() {
+    // Check if cache cleanup is needed
+    if (should_cleanup()) {
+        // Use safe cleanup strategy
+        safe_clear_cache();
+    }
+}
+
+/**
+ * Execute IO merge operation
+ * @param reader IO reader
+ * @param offset File offset
+ * @param len Read length
+ * @param buf Target buffer
+ * @return Whether merge was successful
+ */
+bool merge_io(Reader* reader, uint64_t offset, uint64_t len, void* buf);
+```
+
+## Build and Compilation Policy
+- **Build verification**: The user handles compilation and testing on dedicated test machines
+- **No build automation**: Do not execute build commands or compilation checks unless explicitly requested
+- **Lint checking**: Only check linter errors for files that have been directly modified
+
+## Code Modification Policy
+- **Direct implementation**: When requested to modify a specific location, apply changes directly to the existing codebase
+- **No over-engineering**: Avoid creating auxiliary classes, comparison frameworks, or test harnesses unless explicitly requested
+- **In-place refactoring**: Prefer modifying existing implementations over creating parallel/alternative versions
+- **Minimal scope**: Keep changes focused on the specific request without introducing unnecessary abstractions
