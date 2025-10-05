@@ -9,10 +9,6 @@
 #include <oneapi/tbb/concurrent_queue.h>
 #include "utils.h"
 
-
-// #define ENABLE_PAGE_POOL_EVICTION
-
-
 namespace diskann {
 
 // A simple threadsafe pool of fixed-size pages (SECTOR_LEN bytes, 4KB)
@@ -42,9 +38,6 @@ class PagePool {
   // release a reference to a cached page; when refcount reaches zero, evict and return buffer to freelist
   void leave_page(unsigned page_id);
 
-  // debug function to print all page information
-  void debug_print_all_pages();
-
  private:
   uint64_t page_size_{0};
   std::vector<char*> freelist_;
@@ -63,10 +56,6 @@ class PagePool {
 
   // Zero-ref candidates queue (multi-producer, multi-consumer)
   oneapi::tbb::concurrent_queue<unsigned> zero_ref_queue_;
-
-  // Try evicting one unpinned page (refcount==0). Returns true if a page is evicted
-  // and provides its buffer (and page id if requested).
-  bool evict_one_unpinned(char** out_buf, unsigned* out_page_id);
 };
 
 } // namespace diskann

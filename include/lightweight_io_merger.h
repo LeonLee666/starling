@@ -14,7 +14,7 @@
 #include <folly/AtomicHashMap.h>
 
 namespace diskann {
-    
+
 class LightweightIOMerger {
 public:
     // Simplified IO key encoding for AtomicHashMap compatibility
@@ -102,6 +102,9 @@ public:
     static constexpr size_t get_max_cache_size() {
         return MAX_CACHE_SIZE;
     }
+    
+    // Clear all cached IO entries - useful for starting fresh between test runs
+    static void clear_all_cache();
     
     static uint64_t make_key(uint64_t offset, uint64_t len) {
         return encode_io_key(offset, len);

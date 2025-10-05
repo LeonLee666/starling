@@ -19,6 +19,7 @@
 #include "timer.h"
 #include "utils.h"
 #include "percentile_stats.h"
+#include "lightweight_io_merger.h"
 
 #ifndef _WINDOWS
 #include <sys/mman.h>
@@ -221,6 +222,9 @@ int search_disk_index(
       continue;
     }
 
+    // Clear IO cache before each L test to ensure independent measurements
+    diskann::LightweightIOMerger::clear_all_cache();
+    
     if (beamwidth <= 0) {
       diskann::cout << "Tuning beamwidth.." << std::endl;
       optimized_beamwidth =

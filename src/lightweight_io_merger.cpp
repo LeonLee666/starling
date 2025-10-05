@@ -305,5 +305,27 @@ void LightweightIOMerger::remove_cache_entry(uint64_t key) {
     }
 }
 
+void LightweightIOMerger::clear_all_cache() {
+    // Get current head to know how many entries to clear
+    uint64_t head = fifo_head_.load(std::memory_order_acquire);
+    uint64_t num_entries = std::min<uint64_t>(head, MAX_CACHE_SIZE);
+    
+    // Mark all cached entries as deleted
+    for (uint64_t i = 0; i < num_entries; ++i) {
+        uint64_t key = fifo_keys_[i].load(std::memory_order_acquire);
+        if (key != 0) {
+            auto it = in_flight_ios_.find(key);
+            if (it != in_flight_ios_.end() && it->second) {
+                it->second->deleted.store(true, std::memory_order_release);
+            }
+            // Clear the FIFO slot
+            fifo_keys_[i].store(0, std::memory_order_release);
+        }
+    }
+    
+    // Reset FIFO head counter
+    fifo_head_.store(0, std::memory_order_release);
+}
+
 
 } // namespace diskann

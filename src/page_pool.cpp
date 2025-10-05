@@ -60,7 +60,6 @@ void PagePool::clear_cache() {
 }
 
 char* PagePool::acquire() {
-  // 首先尝试从 freelist 获取
   {
     std::lock_guard<std::mutex> lk(freelist_mutex_);
     if (!freelist_.empty()) {
@@ -69,15 +68,6 @@ char* PagePool::acquire() {
       return p;
     }
   }
-
-#ifdef ENABLE_PAGE_POOL_EVICTION
-  // 尝试淘汰一个未被引用的页面
-  char* evicted = nullptr;
-  if (evict_one_unpinned(&evicted, nullptr)) {
-    return evicted;
-  }
-#endif
-  // 如果淘汰被禁用或者没有可淘汰的页面，返回nullptr
   return nullptr;
 }
 
@@ -85,33 +75,6 @@ void PagePool::release(char* buf) {
   if (buf == nullptr) return;
   std::lock_guard<std::mutex> lk(freelist_mutex_);
   freelist_.push_back(buf);
-}
-
-
-// ---- Eviction using zero-ref candidate queue ----
-bool PagePool::evict_one_unpinned(char** out_buf, unsigned* out_page_id) {
-  // 简单高效的逐个尝试策略，最多尝试20次
-  for (int retry = 0; retry < 20; ++retry) {
-    unsigned victim_id = 0;
-    if (!zero_ref_queue_.try_pop(victim_id)) return false;
-
-    PageMap::accessor acc;
-    if (!page_entries_.find(acc, victim_id)) {
-      // 已被并发清理，尝试下一个
-      continue;
-    }
-    if (acc->second.refcount.load(std::memory_order_relaxed) != 0) {
-      // 被并发 pin：放弃该候选
-      acc.release();
-      continue;
-    }
-    char* buf = acc->second.buf;
-    page_entries_.erase(acc);
-    if (out_buf) *out_buf = buf;
-    if (out_page_id) *out_page_id = victim_id;
-    return true;
-  }
-  return false;
 }
 
 char* PagePool::enter_page(unsigned page_id) {
@@ -162,52 +125,6 @@ char* PagePool::add_page(unsigned page_id, char* buf) {
     // 发布命中仅返回已有缓冲区，不改变引用计数与 LRU，以免意外固定住
     return ret;
   }
-}
-
-void PagePool::debug_print_all_pages() {
-  printf("=== PagePool Debug Information ===\n");
-  
-  // 基本状态信息
-  printf("Page size: %lu bytes\n", page_size_);
-  printf("Total pages allocated: %lu\n", num_pages_allocated_);
-  
-  // Freelist状态
-  size_t freelist_size = 0;
-  {
-    std::lock_guard<std::mutex> lk(freelist_mutex_);
-    freelist_size = freelist_.size();
-  }
-  printf("Freelist size: %lu pages available\n", freelist_size);
-  
-  // 缓存页面详细信息
-  printf("Cached pages detail:\n");
-  size_t cached_pages_count = 0;
-  size_t total_refcount = 0;
-  size_t zero_ref_count = 0;
-  
-  for (auto it = page_entries_.begin(); it != page_entries_.end(); ++it) {
-    uint32_t refcount = it->second.refcount.load(std::memory_order_relaxed);
-    printf("  Page ID: %u, Buffer: %p, RefCount: %u\n", 
-           it->first, it->second.buf, refcount);
-    cached_pages_count++;
-    total_refcount += refcount;
-    if (refcount == 0) zero_ref_count++;
-  }
-  
-  printf("Summary:\n");
-  printf("  Total cached pages: %lu\n", cached_pages_count);
-  printf("  Pages with refcount=0: %lu\n", zero_ref_count);
-  printf("  Total references: %lu\n", total_refcount);
-  printf("  Memory usage: %lu bytes (%lu KB)\n", 
-         cached_pages_count * page_size_, 
-         (cached_pages_count * page_size_) / 1024);
-  
-  // Zero-ref queue状态 (只能检查是否为空)
-  bool queue_empty = zero_ref_queue_.empty();
-  printf("Zero-ref queue: %s\n", queue_empty ? "empty" : "contains candidates");
-  
-  printf("=== End PagePool Debug ===\n");
-  fflush(stdout);
 }
 
 } // namespace diskann

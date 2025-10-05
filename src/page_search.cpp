@@ -469,8 +469,7 @@ namespace diskann {
           }
           num_ios++;
         }
-        
-        // 使用IO合并器替换原有的submit_reqs调用
+
         n_ops = IOMergeWrapper::submit_reqs_merged(
             dynamic_cast<LinuxAlignedFileReader*>(reader.get()), 
             frontier_read_reqs, ctx);
