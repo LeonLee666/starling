@@ -17,7 +17,12 @@ namespace diskann {
 // This provides lock-free performance for high-concurrency IO merging
 // Key is encoded uint64_t combining offset and length
 folly::AtomicHashMap<uint64_t, std::shared_ptr<LightweightIOMerger::IOState>>
-    LightweightIOMerger::in_flight_ios_(1000000);  // 1M entries, ~16MB memory
+    LightweightIOMerger::in_flight_ios_(20000000);
+
+// FIFO tracking static members initialization
+std::array<std::atomic<uint64_t>, LightweightIOMerger::MAX_CACHE_SIZE> 
+    LightweightIOMerger::fifo_keys_{};
+std::atomic<uint64_t> LightweightIOMerger::fifo_head_{0};
 
 int LightweightIOMerger::submit_merged_batch(LinuxAlignedFileReader* reader,
                                             std::vector<AlignedRead>& read_reqs,
@@ -25,11 +30,6 @@ int LightweightIOMerger::submit_merged_batch(LinuxAlignedFileReader* reader,
                                             BatchContext& batch_ctx) {
     if (read_reqs.empty()) {
         return 0;
-    }
-
-    static thread_local uint64_t submit_count = 0;
-    if (++submit_count % 1000 == 0) {
-        cleanup_expired_cache();
     }
     
     std::vector<AlignedRead> actual_io_reqs;
@@ -60,6 +60,8 @@ int LightweightIOMerger::submit_merged_batch(LinuxAlignedFileReader* reader,
         auto result = in_flight_ios_.insert(key, io_state);
         if (result.second) {
             // Successfully inserted, become leader
+            // Track this key in FIFO for future eviction
+            track_key_in_fifo(key);
             // leader needs to perform actual IO
             req.buf = buf; // ensure buffer points to the correct address
             actual_io_reqs.push_back(req);
@@ -73,6 +75,8 @@ int LightweightIOMerger::submit_merged_batch(LinuxAlignedFileReader* reader,
                 result = in_flight_ios_.insert(key, std::make_shared<IOState>(len));
                 if (result.second) {
                     io_state = result.first->second;
+                    // Track this key in FIFO for future eviction
+                    track_key_in_fifo(key);
                     req.buf = buf;
                     actual_io_reqs.push_back(req);
                     batch_leaders.push_back(io_state);
@@ -196,6 +200,10 @@ void LightweightIOMerger::wait_merged_batch(LinuxAlignedFileReader* reader,
         return false;
     };
     
+    // Handle follower requests
+    std::vector<AlignedRead> fallback_reads;
+    std::vector<size_t> fallback_indices;
+    
     for (size_t idx = 0; idx < current_followers.size(); ++idx) {
         auto& follower = current_followers[idx];
         if (!follower.buf) {
@@ -203,50 +211,90 @@ void LightweightIOMerger::wait_merged_batch(LinuxAlignedFileReader* reader,
             continue;
         }
         
+        bool need_fallback = false;
+        
         // Lookup IOState from global hash map (wait-free read with AtomicHashMap)
         auto it = in_flight_ios_.find(follower.key);
         if (it != in_flight_ios_.end()) {
             auto io_state = it->second;
-            // Skip if marked as deleted
+            // Check if marked as deleted - need fallback to direct IO
             if (io_state && io_state->deleted.load(std::memory_order_acquire)) {
-                continue;
-            }
-            if (!io_state) {
+                need_fallback = true;
+            } else if (!io_state) {
                 std::cerr << "ERROR: IOState is null for follower request" << std::endl;
-                continue;
-            }
-            
-            // Check if already completed first (fast path)
-            bool completed = io_state->completed.load(std::memory_order_acquire);
-            if (!completed) {
-                // Slow path: spin-wait for leader to complete
-                completed = spin_wait_for_completion(io_state);
-            }
-            
-            if (completed) {
-                char* cached_ptr = io_state->cached_data.load(std::memory_order_acquire);
-                if (cached_ptr != nullptr) {
-                    std::memcpy(follower.buf, cached_ptr, follower.len);
-                } else {
-                    uint64_t offset = LightweightIOMerger::decode_io_key(follower.key);
-                    std::cerr << "WARNING: No cached data available for follower (offset=" 
-                              << offset << ")" << std::endl;
-                }
+                need_fallback = true;
             } else {
-                uint64_t offset = LightweightIOMerger::decode_io_key(follower.key);
-                std::cerr << "ERROR: Timeout waiting for leader IO after spin-wait (offset=" 
-                          << offset << ")" << std::endl;
+                // Check if already completed first (fast path)
+                bool completed = io_state->completed.load(std::memory_order_acquire);
+                if (!completed) {
+                    // Slow path: spin-wait for leader to complete
+                    completed = spin_wait_for_completion(io_state);
+                }
+                
+                if (completed) {
+                    char* cached_ptr = io_state->cached_data.load(std::memory_order_acquire);
+                    if (cached_ptr != nullptr) {
+                        std::memcpy(follower.buf, cached_ptr, follower.len);
+                    } else {
+                        // No cached data, need fallback
+                        need_fallback = true;
+                    }
+                } else {
+                    // Timeout, need fallback
+                    need_fallback = true;
+                }
             }
         } else {
+            // Entry not found, need fallback
+            need_fallback = true;
+            std::cerr << "ERROR: IOState is not found for follower request" << std::endl;
+        }
+        
+        // If we need fallback, perform direct synchronous read
+        if (need_fallback) {
             uint64_t offset = LightweightIOMerger::decode_io_key(follower.key);
-            std::cerr << "ERROR: Cannot find IOState for follower (offset=" 
-                      << offset << ")" << std::endl;
+            AlignedRead fallback_req;
+            fallback_req.buf = follower.buf;
+            fallback_req.len = follower.len;
+            fallback_req.offset = offset;
+            fallback_reads.push_back(fallback_req);
+            fallback_indices.push_back(idx);
+        }
+    }
+    
+    // Execute fallback reads synchronously if needed
+    if (!fallback_reads.empty()) {
+        try {
+            reader->read(fallback_reads, ctx, false);  // Synchronous read
+        } catch (const std::exception& e) {
+            std::cerr << "ERROR: Fallback read failed: " << e.what() << std::endl;
         }
     }
 }
 
-void LightweightIOMerger::cleanup_expired_cache() {
-    return;
+void LightweightIOMerger::track_key_in_fifo(uint64_t key) {
+    // Atomically get current position and increment (lock-free)
+    uint64_t current_pos = fifo_head_.fetch_add(1, std::memory_order_acq_rel);
+    
+    // Calculate position in circular buffer
+    uint64_t slot = current_pos % MAX_CACHE_SIZE;
+    
+    // If buffer is full (current_pos >= MAX_CACHE_SIZE), evict the entry we're about to overwrite
+    if (current_pos >= MAX_CACHE_SIZE) {
+        // Get the old key at this position before overwriting
+        uint64_t old_key = fifo_keys_[slot].load(std::memory_order_acquire);
+        
+        // Soft delete the old entry if it exists
+        if (old_key != 0) {
+            auto it = in_flight_ios_.find(old_key);
+            if (it != in_flight_ios_.end() && it->second) {
+                it->second->deleted.store(true, std::memory_order_release);
+            }
+        }
+    }
+    
+    // Store new key at this position
+    fifo_keys_[slot].store(key, std::memory_order_release);
 }
 
 void LightweightIOMerger::remove_cache_entry(uint64_t key) {

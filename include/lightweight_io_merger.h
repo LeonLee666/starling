@@ -58,6 +58,11 @@ private:
     // Pre-allocated with 1M entries (~16MB memory)
     static folly::AtomicHashMap<uint64_t, std::shared_ptr<IOState>> in_flight_ios_;
     
+    // FIFO tracking for cache eviction - circular buffer of keys
+    static constexpr size_t MAX_CACHE_SIZE = 1000000;  
+    static std::array<std::atomic<uint64_t>, MAX_CACHE_SIZE> fifo_keys_;
+    static std::atomic<uint64_t> fifo_head_;  // Monotonically increasing counter
+    
 public:
     // Follower request information
     struct FollowerRequest {
@@ -85,17 +90,26 @@ public:
                                    int n_ops,
                                    BatchContext& batch_ctx);
     
-    // 清理过期的缓存条目
-    static void cleanup_expired_cache();
-    
     // Remove specific cache entry
     static void remove_cache_entry(uint64_t key);
+    
+    // Get current cache statistics
+    static size_t get_cache_size() {
+        uint64_t head = fifo_head_.load(std::memory_order_acquire);
+        return std::min<size_t>(head, MAX_CACHE_SIZE);
+    }
+    
+    static constexpr size_t get_max_cache_size() {
+        return MAX_CACHE_SIZE;
+    }
     
     static uint64_t make_key(uint64_t offset, uint64_t len) {
         return encode_io_key(offset, len);
     }
     
 private:
+    // Track new key in FIFO and evict old ones if necessary
+    static void track_key_in_fifo(uint64_t key);
     
 };
 

@@ -62,7 +62,7 @@ USE_PAGE_SEARCH=1 # Set 0 for beam search, 1 for page search (default)
 PS_USE_RATIO=0.2
 
 # KNN
-LS="10 20 30 40 50 60 70 80 90 100"
+LS="10 20 30 10 20 30 40 50 60 70 80 90 100"
 
 # Range search
 RS_LS="80"
