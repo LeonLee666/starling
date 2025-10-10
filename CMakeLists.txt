@@ -19,8 +19,6 @@ project(diskann)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_subdirectory(graph_partition)
-
 if(MSVC)
 	cmake_minimum_required(VERSION 3.15)
 else()
@@ -28,10 +26,6 @@ else()
 endif()
 
 set(CMAKE_STANDARD 14)
-
-if(NOT MSVC)
-	set(CMAKE_CXX_COMPILER g++)
-endif()
 
 # Install nuget packages for dependencies.
 if (MSVC)
@@ -234,9 +228,11 @@ else()
     #	set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DDEBUG -O0 -fsanitize=address -fsanitize=leak -fsanitize=undefined")
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DDEBUG -Wall -Wextra")
 	set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Ofast -DNDEBUG -march=native -mtune=native -ftree-vectorize")
-	add_compile_options(-march=native -Wall -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free -fopenmp -fopenmp-simd -funroll-loops -Wfatal-errors -DUSE_AVX2)
+    add_compile_options(-march=native -Wall -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free -fopenmp -fopenmp-simd -funroll-loops -Wfatal-errors -DUSE_AVX2 -mwaitpkg)
+    add_link_options(-mwaitpkg)
 endif()
 
+add_subdirectory(graph_partition)
 add_subdirectory(src)
 add_subdirectory(tests/utils)
 add_subdirectory(tests)
