@@ -6,6 +6,7 @@
 #include <iostream>
 #include <algorithm>
 #include <atomic>
+#include <spdlog/spdlog.h>
 #include "logger.h"
 #include "percentile_stats.h"
 #include "pq_flash_index.h"
@@ -416,6 +417,7 @@ namespace diskann {
         const unsigned pid = id2page_[retset[marker].id];
         if (retset[marker].flag && page_visited.find(pid) == page_visited.end()) {
           num_seen++;
+          spdlog::info("{}", pid);
           char* cached_page_buf = page_pool_.enter_page(pid);
           if (cached_page_buf != nullptr) {
             page_cached_nhoods.emplace_back(pid, cached_page_buf);

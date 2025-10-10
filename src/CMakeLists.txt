@@ -19,8 +19,8 @@ else()
     add_library(${PROJECT_NAME}_s STATIC ${CPP_SOURCES})
     
     # Link libraries - folly dependencies will be resolved in the shared library
-    target_link_libraries(${PROJECT_NAME} PUBLIC onetbb::onetbb aio folly::folly)
-    target_link_libraries(${PROJECT_NAME}_s PUBLIC onetbb::onetbb aio folly::folly)
+    target_link_libraries(${PROJECT_NAME} PUBLIC onetbb::onetbb aio folly::folly spdlog::spdlog)
+    target_link_libraries(${PROJECT_NAME}_s PUBLIC onetbb::onetbb aio folly::folly spdlog::spdlog)
     
     # Ensure folly symbols are properly exported from shared library
     target_link_options(${PROJECT_NAME} PRIVATE -Wl,--no-as-needed)

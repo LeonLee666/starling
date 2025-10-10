@@ -31,6 +31,7 @@ add_definitions(-DFOLLY_SSE=4)
 
 find_package(folly REQUIRED)
 find_package(TBB REQUIRED)
+find_package(spdlog REQUIRED)
 
 # Install nuget packages for dependencies.
 if (MSVC)

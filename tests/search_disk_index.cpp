@@ -10,6 +10,8 @@
 #include <string.h>
 #include <time.h>
 #include <boost/program_options.hpp>
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/basic_file_sink.h>
 
 #include "aux_utils.h"
 #include "index.h"
@@ -356,6 +358,16 @@ int search_disk_index(
 }
 
 int main(int argc, char** argv) {
+  // Initialize global spdlog logger with file output
+  try {
+    auto file_logger = spdlog::basic_logger_mt("starling_logger", "starling_search.log");
+    spdlog::set_default_logger(file_logger);
+    spdlog::set_level(spdlog::level::info);  // Set log level: trace, debug, info, warn, error, critical
+    spdlog::set_pattern("%v");  // Customize log format
+  } catch (const spdlog::spdlog_ex& ex) {
+    std::cerr << "Log initialization failed: " << ex.what() << std::endl;
+  }
+  
   std::string data_type, dist_fn, index_path_prefix, result_path_prefix,
       query_file, gt_file, disk_file_path, mem_index_path;
   unsigned              num_threads, K, W, num_nodes_to_cache, search_io_limit;

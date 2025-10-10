@@ -1,6 +1,7 @@
 [requires]
 onetbb/2022.2.0
 folly/2024.08.12.00
+spdlog/1.14.1
 [generators]
 CMakeDeps
 CMakeToolchain
