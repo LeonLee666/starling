@@ -56,12 +56,14 @@ private:
     // Global in-flight IO table - Folly's lock-free AtomicHashMap for maximum performance
     // Key: encoded uint64_t (offset + len), Value: IOState shared_ptr
     // Pre-allocated with 1M entries (~16MB memory)
-    static folly::AtomicHashMap<uint64_t, std::shared_ptr<IOState>> in_flight_ios_;
+    // Use pointer to enable full reconstruction for cache clearing
+    static std::atomic<folly::AtomicHashMap<uint64_t, std::shared_ptr<IOState>>*> in_flight_ios_;
     
     // FIFO tracking for cache eviction - circular buffer of keys
     static constexpr size_t MAX_CACHE_SIZE = 1000000;  
-    static std::array<std::atomic<uint64_t>, MAX_CACHE_SIZE> fifo_keys_;
+    static std::atomic<uint64_t>* fifo_keys_;  // Use pointer to enable full reconstruction
     static std::atomic<uint64_t> fifo_head_;  // Monotonically increasing counter
+    static std::mutex reconstruction_mutex_;  // Protect reconstruction during clear
     
 public:
     // Follower request information

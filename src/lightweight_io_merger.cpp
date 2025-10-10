@@ -13,16 +13,14 @@
 
 namespace diskann {
 
-// Static member definition - AtomicHashMap with 1M pre-allocated slots
-// This provides lock-free performance for high-concurrency IO merging
-// Key is encoded uint64_t combining offset and length
-folly::AtomicHashMap<uint64_t, std::shared_ptr<LightweightIOMerger::IOState>>
-    LightweightIOMerger::in_flight_ios_(20000000);
+// Static member initialization - use pointers to enable full reconstruction
+std::atomic<folly::AtomicHashMap<uint64_t, std::shared_ptr<LightweightIOMerger::IOState>>*>
+    LightweightIOMerger::in_flight_ios_(new folly::AtomicHashMap<uint64_t, std::shared_ptr<LightweightIOMerger::IOState>>(20000000));
 
-// FIFO tracking static members initialization
-std::array<std::atomic<uint64_t>, LightweightIOMerger::MAX_CACHE_SIZE> 
-    LightweightIOMerger::fifo_keys_{};
+// FIFO tracking static members initialization - use pointer for reconstruction
+std::atomic<uint64_t>* LightweightIOMerger::fifo_keys_ = new std::atomic<uint64_t>[LightweightIOMerger::MAX_CACHE_SIZE]();
 std::atomic<uint64_t> LightweightIOMerger::fifo_head_{0};
+std::mutex LightweightIOMerger::reconstruction_mutex_;
 
 int LightweightIOMerger::submit_merged_batch(LinuxAlignedFileReader* reader,
                                             std::vector<AlignedRead>& read_reqs,
@@ -56,8 +54,11 @@ int LightweightIOMerger::submit_merged_batch(LinuxAlignedFileReader* reader,
             continue;
         }
         
+        // Get current hash map pointer
+        auto* hash_map = in_flight_ios_.load(std::memory_order_acquire);
+        
         // Atomically find or create IO state (lock-free with AtomicHashMap)
-        auto result = in_flight_ios_.insert(key, io_state);
+        auto result = hash_map->insert(key, io_state);
         if (result.second) {
             // Successfully inserted, become leader
             // Track this key in FIFO for future eviction
@@ -72,7 +73,7 @@ int LightweightIOMerger::submit_merged_batch(LinuxAlignedFileReader* reader,
             // Skip if entry is marked as deleted
             if (io_state && io_state->deleted.load(std::memory_order_acquire)) {
                 // Entry is being deleted, retry as leader
-                result = in_flight_ios_.insert(key, std::make_shared<IOState>(len));
+                result = hash_map->insert(key, std::make_shared<IOState>(len));
                 if (result.second) {
                     io_state = result.first->second;
                     // Track this key in FIFO for future eviction
@@ -213,9 +214,12 @@ void LightweightIOMerger::wait_merged_batch(LinuxAlignedFileReader* reader,
         
         bool need_fallback = false;
         
+        // Get current hash map pointer
+        auto* hash_map = in_flight_ios_.load(std::memory_order_acquire);
+        
         // Lookup IOState from global hash map (wait-free read with AtomicHashMap)
-        auto it = in_flight_ios_.find(follower.key);
-        if (it != in_flight_ios_.end()) {
+        auto it = hash_map->find(follower.key);
+        if (it != hash_map->end()) {
             auto io_state = it->second;
             // Check if marked as deleted - need fallback to direct IO
             if (io_state && io_state->deleted.load(std::memory_order_acquire)) {
@@ -279,6 +283,9 @@ void LightweightIOMerger::track_key_in_fifo(uint64_t key) {
     // Calculate position in circular buffer
     uint64_t slot = current_pos % MAX_CACHE_SIZE;
     
+    // Get current hash map pointer
+    auto* hash_map = in_flight_ios_.load(std::memory_order_acquire);
+    
     // If buffer is full (current_pos >= MAX_CACHE_SIZE), evict the entry we're about to overwrite
     if (current_pos >= MAX_CACHE_SIZE) {
         // Get the old key at this position before overwriting
@@ -286,8 +293,8 @@ void LightweightIOMerger::track_key_in_fifo(uint64_t key) {
         
         // Soft delete the old entry if it exists
         if (old_key != 0) {
-            auto it = in_flight_ios_.find(old_key);
-            if (it != in_flight_ios_.end() && it->second) {
+            auto it = hash_map->find(old_key);
+            if (it != hash_map->end() && it->second) {
                 it->second->deleted.store(true, std::memory_order_release);
             }
         }
@@ -298,33 +305,40 @@ void LightweightIOMerger::track_key_in_fifo(uint64_t key) {
 }
 
 void LightweightIOMerger::remove_cache_entry(uint64_t key) {
+    // Get current hash map pointer
+    auto* hash_map = in_flight_ios_.load(std::memory_order_acquire);
+    
     // AtomicHashMap doesn't support erase, use soft delete instead
-    auto it = in_flight_ios_.find(key);
-    if (it != in_flight_ios_.end() && it->second) {
+    auto it = hash_map->find(key);
+    if (it != hash_map->end() && it->second) {
         it->second->deleted.store(true, std::memory_order_release);
     }
 }
 
 void LightweightIOMerger::clear_all_cache() {
-    // Get current head to know how many entries to clear
-    uint64_t head = fifo_head_.load(std::memory_order_acquire);
-    uint64_t num_entries = std::min<uint64_t>(head, MAX_CACHE_SIZE);
+    // Use mutex to ensure only one thread performs reconstruction at a time
+    std::lock_guard<std::mutex> lock(reconstruction_mutex_);
     
-    // Mark all cached entries as deleted
-    for (uint64_t i = 0; i < num_entries; ++i) {
-        uint64_t key = fifo_keys_[i].load(std::memory_order_acquire);
-        if (key != 0) {
-            auto it = in_flight_ios_.find(key);
-            if (it != in_flight_ios_.end() && it->second) {
-                it->second->deleted.store(true, std::memory_order_release);
-            }
-            // Clear the FIFO slot
-            fifo_keys_[i].store(0, std::memory_order_release);
-        }
-    }
+    // Brutally destroy and reconstruct the entire hash map and FIFO array
+    // This is the most thorough way to clear all state and avoid hash collision accumulation
     
-    // Reset FIFO head counter
+    // Step 1: Get old pointers
+    auto* old_hash_map = in_flight_ios_.load(std::memory_order_acquire);
+    auto* old_fifo_keys = fifo_keys_;
+    
+    // Step 2: Create brand new data structures
+    auto* new_hash_map = new folly::AtomicHashMap<uint64_t, std::shared_ptr<IOState>>(20000000);
+    auto* new_fifo_keys = new std::atomic<uint64_t>[MAX_CACHE_SIZE]();
+    
+    // Step 3: Atomically swap to new structures
+    in_flight_ios_.store(new_hash_map, std::memory_order_release);
+    fifo_keys_ = new_fifo_keys;
     fifo_head_.store(0, std::memory_order_release);
+    
+    // Step 4: Delete old structures (this will trigger IOState destructors and free all cached memory)
+    // The shared_ptr reference count will drop, and all IOState objects will be destroyed
+    delete old_hash_map;
+    delete[] old_fifo_keys;
 }
 
 

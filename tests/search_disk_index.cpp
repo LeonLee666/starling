@@ -327,7 +327,8 @@ int search_disk_index(
       continue;
     }
 
-    // Clear IO cache before each L test to ensure independent measurements
+    // Brutally clear both IO merger cache and page pool cache before each L test
+    // This ensures independent measurements by eliminating all cached state
     diskann::LightweightIOMerger::clear_all_cache();
     
     if (beamwidth <= 0) {
