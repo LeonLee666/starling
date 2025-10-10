@@ -80,7 +80,6 @@ namespace diskann {
     // 跳过注释行并解析数据
     while (std::getline(priority_stream, line)) {
       if (line.empty() || line[0] == '#') continue;
-      
       std::istringstream iss(line);
       unsigned partition_id;
       float priority_score;
@@ -261,7 +260,7 @@ namespace diskann {
     float *dist_scratch = query_scratch->aligned_dist_scratch;
     _u8 *  pq_coord_scratch = query_scratch->aligned_pq_coord_scratch;
 
-    Timer                 query_timer, io_timer, cpu_timer;
+    Timer query_timer, io_timer, cpu_timer;
     std::vector<Neighbor> retset(l_search + 1);
     tsl::robin_set<_u64> &visited = *(query_scratch->visited);
     tsl::robin_set<unsigned> &page_visited = *(query_scratch->page_visited);
@@ -465,7 +464,6 @@ namespace diskann {
               fnhood.second);
           if (stats != nullptr) {
             stats->n_4k++;
-            stats->n_ios++;
           }
           num_ios++;
         }
@@ -473,6 +471,8 @@ namespace diskann {
         n_ops = IOMergeWrapper::submit_reqs_merged(
             dynamic_cast<LinuxAlignedFileReader*>(reader.get()), 
             frontier_read_reqs, ctx);
+        stats->n_ios += n_ops;
+        stats->n_cache_hits += (frontier.size() - n_ops);
 
         if (this->count_visited_nodes) {
 #pragma omp critical
