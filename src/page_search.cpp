@@ -232,7 +232,7 @@ namespace diskann {
 
 #ifdef DYN_BEAM_WIDTH
       // Update beam width using static policy based on search progress
-      constexpr _u32 kBeamWidths[] = {2, 2, 4, 4, 8, 8, 12, 12, 16};
+      constexpr _u32 kBeamWidths[] = {4, 4, 4, 8, 8, 8, 16, 16, 16};
       cur_beam_width = kBeamWidths[std::min(max_marker / 5, 8u)];
       // Ensure we don't exceed the maximum beam width
       cur_beam_width = std::min(cur_beam_width, (_u32)beam_width);
