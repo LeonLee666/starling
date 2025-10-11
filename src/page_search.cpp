@@ -46,10 +46,9 @@ namespace diskann {
 
   template<typename T>
   void PQFlashIndex<T>::load_and_cache_high_priority_partitions(const std::string &index_prefix) {
-    // 尝试多种缓存策略，按优先级顺序
     std::vector<std::pair<std::string, std::string>> strategies = {
         {"_top_pagerank_pages.txt", "PageRank"},           // 1st choice: Page级PageRank
-        {"_top_centrality_partitions.txt", "度中心性"},     // 2nd choice: 度中心性
+        {"_top_centrality_partitions.txt", "Centrality"},     // 2nd choice: 度中心性
     };
     
     std::ifstream priority_stream;
@@ -67,11 +66,11 @@ namespace diskann {
     }
     
     if (!priority_stream.is_open()) {
-      diskann::cout << "Warning: 未找到任何partition优先级文件，跳过预缓存。" << std::endl;
+      diskann::cout << "Warning: No partition priority file found, skipping pre-caching." << std::endl;
       return;
     }
     
-    diskann::cout << "使用缓存策略：" << strategy_name << "，文件：" << priority_file << std::endl;
+    diskann::cout << "Using cache strategy: " << strategy_name << ", file: " << priority_file << std::endl;
     
     std::string line;
     partition_priority_.clear();
@@ -80,7 +79,6 @@ namespace diskann {
     // 跳过注释行并解析数据
     while (std::getline(priority_stream, line)) {
       if (line.empty() || line[0] == '#') continue;
-      
       std::istringstream iss(line);
       unsigned partition_id;
       float priority_score;
@@ -92,55 +90,71 @@ namespace diskann {
     priority_stream.close();
     
     if (partition_priority_.empty()) {
-      diskann::cout << "Warning: 没有读取到有效的partition优先级信息。" << std::endl;
+      diskann::cout << "Warning: No valid partition priority information found." << std::endl;
       return;
     }
     
     diskann::cout << "Loaded " << partition_priority_.size() << " partition priority entries using " << strategy_name << " strategy." << std::endl;
     
-    // 限制要缓存的partition数量
+    // Limit the number of partitions to cache
     unsigned num_to_cache = high_priority_partitions_.size();
     
     diskann::cout << "Pre-caching " << num_to_cache << " high priority partitions..." << std::endl;
     
-    // 提前初始化PagePool用于预缓存
+    // Initialize PagePool for pre-caching
     diskann::cout << "Initializing PagePool for pre-caching..." << std::endl;
     page_pool_.init((uint64_t)(num_to_cache), (uint64_t) SECTOR_LEN);
     
-    // 预缓存高优先级partition对应的页面  
-    unsigned cached_pages = 0;
+    // Pre-cache high priority partition pages with OpenMP parallelization
+    std::atomic<unsigned> cached_pages{0};
+    std::atomic<bool> pool_exhausted{false};
+    
+    #pragma omp parallel for schedule(dynamic, 4) num_threads(std::min(8u, num_to_cache))
     for (unsigned i = 0; i < num_to_cache; i++) {
-      unsigned partition_id = high_priority_partitions_[i];
-      
-      // 检查partition_id是否有效
-      if (partition_id >= gp_layout_.size()) {
-        diskann::cout << "Warning: Invalid partition_id " << partition_id 
-                     << " (max: " << gp_layout_.size() - 1 << ")" << std::endl;
+      // Stop if pool is exhausted
+      if (pool_exhausted.load(std::memory_order_acquire)) {
         continue;
       }
       
-      // 跳过空分区
+      unsigned partition_id = high_priority_partitions_[i];
+      
+      // Check if partition_id is valid
+      if (partition_id >= gp_layout_.size()) {
+        #pragma omp critical
+        {
+          diskann::cout << "Warning: Invalid partition_id " << partition_id 
+                       << " (max: " << gp_layout_.size() - 1 << ")" << std::endl;
+        }
+        continue;
+      }
+      
+      // Skip empty partition
       if (gp_layout_[partition_id].empty()) {
         continue;
       }
       
-      // partition_id 就是 page_id！
+      // partition_id is the page_id!
       unsigned page_id = partition_id;
       
-      // 该页面已经在page pool中了，跳过
+      // The page is already in page pool, skip
       if (page_pool_.contains(page_id)) {
         continue;
       }
       
-      // 尝试预读并缓存这个partition对应的页面
+      // Try to pre-read and cache the page corresponding to this partition
       try {
         char* buf = page_pool_.acquire();
         if (buf == nullptr) {
-          diskann::cout << "Warning: 无法获取缓存空间，停止预缓存。已缓存页面数: " << cached_pages << std::endl;
-          break;
+          pool_exhausted.store(true, std::memory_order_release);
+          #pragma omp critical
+          {
+            diskann::cout << "Warning: Unable to get cache space, stopping pre-caching. Number of cached pages: " 
+                         << cached_pages.load() << std::endl;
+          }
+          continue;
         }
         
-        // 借用已经初始化的线程上下文
+        // Use the already initialized thread context (thread-safe pop)
         ThreadData<T> data = this->thread_data.pop();
         while (data.scratch.sector_scratch == nullptr) {
           this->thread_data.wait_for_push_notify();
@@ -148,34 +162,37 @@ namespace diskann {
         }
         IOContext &ctx = data.ctx;
         
-        // 读取页面内容（使用AlignedFileReader）
+        // Read page content (using AlignedFileReader)
         std::vector<AlignedRead> read_reqs;
         AlignedRead read_req;
         read_req.buf = buf;
         read_req.len = SECTOR_LEN;
-        read_req.offset = SECTOR_LEN * (1 + page_id); // +1 跳过header sector，使用正确的page_id
+        read_req.offset = SECTOR_LEN * (1 + page_id); // +1 skip header sector, use correct page_id
         read_reqs.push_back(read_req);
         
-        reader->read(read_reqs, ctx, false); // 同步读取（blocking call）
+        reader->read(read_reqs, ctx, false); // Synchronous read (blocking call)
         
-        // 归还线程上下文
+        // Return thread context (thread-safe push)
         this->thread_data.push(data);
         this->thread_data.push_notify_all();
         
-        // 将页面添加到page pool（使用正确的page_id）
+        // Add page to page pool (using correct page_id)
         char* canonical_buf = page_pool_.add_page(page_id, buf);
         if (canonical_buf != buf) {
-          // 页面已经存在（并发情况），释放我们申请的缓冲区
+          // Page already exists (concurrent case), release our allocated buffer
           page_pool_.release(buf);
         }
-        cached_pages++;        
+        cached_pages.fetch_add(1, std::memory_order_relaxed);
       } catch (const std::exception& e) {
-        diskann::cout << "Warning: 预缓存partition " << partition_id 
-                     << " 失败: " << e.what() << std::endl;
+        #pragma omp critical
+        {
+          diskann::cout << "Warning: Pre-cache partition " << partition_id 
+                       << " failed: " << e.what() << std::endl;
+        }
         continue;
       }
     }
-    diskann::cout << "Successfully pre-cached " << cached_pages
+    diskann::cout << "Successfully pre-cached " << cached_pages.load()
                    << " high priority partition pages using " << strategy_name << " strategy." << std::endl;
   }
 
