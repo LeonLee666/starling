@@ -7,6 +7,7 @@
 #include "timer.h"
 
 #define DYN_BEAM_WIDTH
+#define DYN_PAGE_RATIO
 
 namespace diskann {
   template<typename T>
@@ -116,6 +117,13 @@ namespace diskann {
     _u32 cur_beam_width = beam_width;  // use fixed beam width
 #endif
     _u32 max_marker = 0;  // track search progress
+
+    // Dynamic page ratio - using static policy
+#ifdef DYN_PAGE_RATIO
+    float cur_use_ratio = 1;  // start with small page ratio
+#else
+    float cur_use_ratio = use_ratio;  // use fixed page ratio
+#endif
 
     _u32                        best_medoid = 0;
     float                       best_dist = (std::numeric_limits<float>::max)();
@@ -232,10 +240,18 @@ namespace diskann {
 
 #ifdef DYN_BEAM_WIDTH
       // Update beam width using static policy based on search progress
-      constexpr _u32 kBeamWidths[] = {4, 4, 4, 8, 8, 8, 16, 16, 16};
-      cur_beam_width = kBeamWidths[std::min(max_marker / 5, 8u)];
+      constexpr _u32 kBeamWidths[] = {4, 4, 8, 8, 8, 8, 16, 16, 16};
+      cur_beam_width = kBeamWidths[std::min(max_marker / 3, 8u)];
       // Ensure we don't exceed the maximum beam width
       cur_beam_width = std::min(cur_beam_width, (_u32)beam_width);
+#endif
+
+#ifdef DYN_PAGE_RATIO
+      // Update page ratio using static policy based on search progress
+      constexpr float kPageRatios[] = {1.0, 1.0, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2};
+      cur_use_ratio = kPageRatios[std::min(max_marker / 5, 8u)];
+      // Ensure we don't exceed the maximum page ratio
+      cur_use_ratio = std::min(cur_use_ratio, use_ratio);
 #endif
 
       // find new beam
@@ -304,7 +320,7 @@ namespace diskann {
         const unsigned pid = id2page_[last_io_id];
         const unsigned p_size = gp_layout_[pid].size();
         // minus one for the vector that is computed previously
-        unsigned vis_size = use_ratio * (p_size - 1);
+        unsigned vis_size = cur_use_ratio * (p_size - 1);
         std::vector<std::pair<float, const char*>> vis_cand;
         vis_cand.reserve(p_size);
 
