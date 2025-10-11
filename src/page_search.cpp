@@ -11,6 +11,7 @@
 #include "timer.h"
 
 #define DYN_BEAM_WIDTH
+#define DYN_PAGE_RATIO
 #define PAGE_BUF_SIZE 50000
 #define ENABLE_PAGE_POOL_REUSE_OPTIMIZATION
 
@@ -258,6 +259,13 @@ namespace diskann {
 #endif
     _u32 max_marker = 0;  // track search progress
 
+    // Dynamic page ratio - using static policy
+#ifdef DYN_PAGE_RATIO
+    float cur_use_ratio = 1;  // start with small page ratio
+#else
+    float cur_use_ratio = use_ratio;  // use fixed page ratio
+#endif
+
     _u32                        best_medoid = 0;
     float                       best_dist = (std::numeric_limits<float>::max)();
     std::vector<SimpleNeighbor> medoid_dists;
@@ -381,10 +389,18 @@ namespace diskann {
 
 #ifdef DYN_BEAM_WIDTH
       // Update beam width using static policy based on search progress
-      constexpr _u32 kBeamWidths[] = {4, 4, 4, 8, 8, 8, 16, 16, 16};
-      cur_beam_width = kBeamWidths[std::min(max_marker / 5, 8u)];
+      constexpr _u32 kBeamWidths[] = {4, 4, 8, 8, 8, 8, 16, 16, 16};
+      cur_beam_width = kBeamWidths[std::min(max_marker / 3, 8u)];
       // Ensure we don't exceed the maximum beam width
       cur_beam_width = std::min(cur_beam_width, (_u32)beam_width);
+#endif
+
+#ifdef DYN_PAGE_RATIO
+      // Update page ratio using static policy based on search progress
+      constexpr float kPageRatios[] = {1.0, 1.0, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2};
+      cur_use_ratio = kPageRatios[std::min(max_marker / 5, 8u)];
+      // Ensure we don't exceed the maximum page ratio
+      cur_use_ratio = std::min(cur_use_ratio, use_ratio);
 #endif
 
       // find new beam
@@ -466,7 +482,7 @@ namespace diskann {
         const unsigned pid = id2page_[last_io_id];
         const unsigned p_size = gp_layout_[pid].size();
         // minus one for the vector that is computed previously
-        unsigned vis_size = use_ratio * (p_size - 1);
+        unsigned vis_size = cur_use_ratio * (p_size - 1);
         std::vector<std::pair<float, const char*>> vis_cand;
         vis_cand.reserve(p_size);
         for (unsigned j = 0; j < p_size; ++j) {
@@ -497,6 +513,9 @@ namespace diskann {
           const unsigned pid = pc.first;  // now directly stores page_id
           char *sector_buf = pc.second;
           const unsigned page_size = gp_layout_[pid].size();
+          unsigned vis_size = cur_use_ratio * page_size;
+          std::vector<std::pair<float, const char*>> vis_cand;
+          vis_cand.reserve(page_size);
           for (unsigned j = 0; j < page_size; ++j) {
             const unsigned node_id = gp_layout_[pid][j];
             char *node_buf = sector_buf + j * max_node_len;
@@ -504,8 +523,15 @@ namespace diskann {
             const T* node_coords = (const T*)node_buf;
             float cur_expanded_dist = dist_cmp->compare(query, node_coords, (unsigned) aligned_dim);
             full_retset.push_back(Neighbor(node_id, cur_expanded_dist, true));
+            vis_cand.emplace_back(cur_expanded_dist, node_buf);
+          }
+          if (vis_size && vis_size != page_size) {
+            std::sort(vis_cand.begin(), vis_cand.end());
+          }
 
-            compute_and_push_nbrs(node_buf, nk);
+          // compute PQ distances for neighbours of the vectors in the page
+          for (unsigned j = 0; j < vis_size; ++j) {
+            compute_and_push_nbrs(vis_cand[j].second, nk);
           }
         }
 
