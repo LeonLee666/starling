@@ -43,8 +43,6 @@
 #define INF 0xffffffff
 #endif  // INF
 
-#define TOP_PARTITIONS_COUNT 50000
-
 #ifndef READ_U64
 #define READ_U64(stream, val) stream.read((char *)&val, sizeof(_u64))
 #endif  // !READ_U64
@@ -1055,6 +1053,7 @@ class graph_partitioner {
    */
   void calculate_and_save_page_pagerank(const char* filename) {
     std::cout << "开始构建Page级别图并计算PageRank..." << std::endl;
+    auto calc_start = omp_get_wtime();
     
     // Step 1: 构建Page级别的加权图
     struct PageEdge {
@@ -1193,7 +1192,8 @@ class graph_partitioner {
     
     // 输出统计信息
     std::cout << "Page PageRank统计（前10个）:" << std::endl;
-    for (int i = 0; i < std::min(10, (int)_partition_number); i++) {
+    int stat_size = (int)(_partition_number/5);
+    for (int i = 0; i < std::min(10, stat_size); i++) {
       unsigned page_id = pagerank_pairs[i].second;
       std::cout << "Page " << page_id 
                 << ": PageRank=" << pagerank_pairs[i].first
@@ -1201,13 +1201,16 @@ class graph_partitioner {
                 << ", 大小=" << _partition[page_id].size() << ")" << std::endl;
     }
     
+    auto calc_end = omp_get_wtime();
+    std::cout << "Page PageRank计算耗时: " << (calc_end - calc_start) << " 秒" << std::endl;
+    
     // Step 4: 保存到文件
     std::string output_filename = std::string(filename) + "_top_pagerank_pages.txt";
     std::ofstream output_file(output_filename);
     if (output_file.is_open()) {
-      output_file << "# Top " << TOP_PARTITIONS_COUNT << " pages ranked by PageRank score\n";
+      output_file << "# Top " << stat_size << " pages ranked by PageRank score\n";
       output_file << "# Format: page_id pagerank_score out_degree page_size\n";
-      for (int i = 0; i < std::min((int)TOP_PARTITIONS_COUNT, (int)_partition_number); i++) {
+      for (int i = 0; i < stat_size; i++) {
         unsigned page_id = pagerank_pairs[i].second;
         output_file << page_id << " " << pagerank_pairs[i].first 
                    << " " << page_outdegree[page_id] << " " << _partition[page_id].size() << std::endl;
@@ -1227,6 +1230,7 @@ class graph_partitioner {
    */
   void calculate_and_save_partition_centrality(const char* filename) {
     std::cout << "开始计算partition度中心性统计..." << std::endl;
+    auto calc_start = omp_get_wtime();
     
     // 计算每个partition的入度、出度和度中心性
     std::vector<unsigned> partition_indegree(_partition_number, 0);
@@ -1290,6 +1294,9 @@ class graph_partitioner {
                 << ", 出度=" << partition_outdegree[pid] 
                 << ", 大小=" << _partition[pid].size() << ")" << std::endl;
     }
+    
+    auto calc_end = omp_get_wtime();
+    std::cout << "Partition中心性计算耗时: " << (calc_end - calc_start) << " 秒" << std::endl;
     
     // 保存到文件
     std::string output_filename = std::string(filename) + "_top_centrality_partitions.txt";
